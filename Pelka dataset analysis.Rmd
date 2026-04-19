@@ -1,0 +1,1021 @@
+---
+title: "Pelka_merve"
+author: "David López"
+date: "2025-10-21"
+output: html_document
+---
+
+```{r packages, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+packages <- c(
+  "Seurat", "SeuratObject", "dplyr", "ggplot2", "DoubletFinder",
+  "harmony", "celldex", "SingleR", "BiocParallel", "tidyverse", "magrittr",
+  "data.table", "gridExtra", "gdata", "RColorBrewer", "SingleCellExperiment",
+  "pheatmap", "ComplexHeatmap", "EnhancedVolcano", "scGate", "S4Vectors",
+  "corrplot", "ggthemes", "cowplot", "scRNAseq", "scuttle", "SummarizedExperiment",
+  "scran", "scater", "clustree", "openxlsx", "tidyplots", "convert2anndata",
+  "dittoSeq", "clusterProfiler", "enrichplot", "ggmin", "org.Hs.eg.db",
+  "scMetabolism", "rsvd", "viridis", "patchwork", "presto", "UCell", "Matrix",
+  "remotes", "RCAv2", "DUBStepR", "DESeq2", "fgsea", "apeglm", "pathview",
+  "future", "progressr", "readxl", "proxy", "ashr", "SeuratDisk", "GEOquery",
+  "kBET", "rcartocolor", "AUCell", "randomcoloR", "presto", "scDblFinder",
+  "ggpointdensity", "purrr", "scales"
+)
+
+# Cargar todas
+lapply(packages, require, character.only = TRUE)
+
+my_colors <- c("#1E938B", "#FFA844", "#67BB6B", "#E03B3B", "#C580CC", "#8A4CD6", 
+              "#A8A6E2", "#AB307D", "#E96767")
+
+my_colors2 <- c("#1E938B", "#E03B3B", "#67BB6B", "#C580CC", "#FFA844", "#8A4CD6", 
+              "#A8A6E2", "#AB307D", "#E96767")
+```
+
+# Load data
+
+```{r Load data}
+# Load expression data from 10X hdf5 format
+expr_matrix <- Read10X_h5("C:/Users/David Lopez/OneDrive - Universitat de Barcelona/PhD/4o Bloque/scRNA-Seq/Pelka et al/GSE178341_data/GSE178341_crc10x_full_c295v4_submit.h5")
+clusters <- read.csv("C:/Users/David Lopez/OneDrive - Universitat de Barcelona/PhD/4o Bloque/scRNA-Seq/Pelka et al/GSE178341_data/GSE178341_crc10x_full_c295v4_submit_cluster.csv")
+metatables <- read.csv("C:/Users/David Lopez/OneDrive - Universitat de Barcelona/PhD/4o Bloque/scRNA-Seq/Pelka et al/GSE178341_data/GSE178341_crc10x_full_c295v4_submit_metatables.csv")
+
+obj <- CreateSeuratObject(counts = expr_matrix, meta.data= cbind(clusters, metatables))
+
+rm(expr_matrix, clusters, metatables)
+
+##Run clustering & check major cell types 
+obj <- FindVariableFeatures(obj)
+obj <- NormalizeData(obj)
+obj <- ScaleData(obj, split.by= "SINGLECELL_TYPE")
+obj <- RunPCA(obj)
+obj <- FindNeighbors(obj, dims=1:15)
+obj <- FindClusters(obj, res=0.6)
+obj <- RunUMAP(obj, dims= 1:15)
+
+##Discovery plot for batch effect
+umap_clusters <- DimPlot(obj,  group.by = "SINGLECELL_TYPE", cols = my_colors) 
+ggsave("umap_clusters_1st_round_no_batch_effect_correction.png", plot = umap_clusters, width = 6, height = 5, dpi = 300)
+
+lvls <- levels(factor(obj$SINGLECELL_TYPE))
+pal  <- distinctColorPalette(length(lvls))
+names(pal) <- lvls   
+
+p12 <- DimPlot(obj, reduction="pca", dims=c(1,2),
+               group.by="SINGLECELL_TYPE", cols=my_colors, raster=TRUE) + coord_equal()
+
+p13 <- DimPlot(obj, reduction="pca", dims=c(1,3),
+               group.by="SINGLECELL_TYPE", cols=my_colors, raster=TRUE) + coord_equal()
+
+p14 <- DimPlot(obj, reduction="pca", dims=c(1,4),
+               group.by="SINGLECELL_TYPE", cols=my_colors, raster=TRUE) + coord_equal()
+
+p15 <- DimPlot(obj, reduction="pca", dims=c(1,5),
+               group.by="SINGLECELL_TYPE", cols=my_colors, raster=TRUE) + coord_equal()
+
+(p12 | p13) / (p14 | p15)
+ggsave("PCA_batch_effect_control_first_round_clust.png", width=12, height=8, dpi=300)
+```
+
+# Batch Effect Correction
+
+```{r Analysis + Batch Effect Correction}
+##Batch effect correction 
+VariableFeatures(obj) <- split(row.names(obj@meta.data), obj@meta.data$SINGLECELL_TYPE) |> lapply(function(cells_use) {
+  obj[,cells_use] |>
+    FindVariableFeatures(selection.method = "vst", nfeatures = 2000) |> 
+    VariableFeatures()
+}) |> unlist |> unique
+
+obj <- obj |> 
+  ScaleData(verbose = FALSE) |> 
+  RunPCA(features = VariableFeatures(obj), npcs = 20, verbose = FALSE)
+
+obj <- RunHarmony(obj, "SINGLECELL_TYPE")
+obj <- FindNeighbors(obj, dims=1:15, reduction="harmony")
+obj <- FindClusters(obj, res=0.6)
+obj <- RunUMAP(obj, dims= 1:15, reduction="harmony")
+
+umap_clusters <- DimPlot(obj,  group.by = "clTopLevel", label = TRUE, cols = distinctColorPalette(length(unique(obj$clTopLevel)))) 
+ggsave("umap_clusters_1st_round.png", plot = umap_clusters, width = 6, height = 5, dpi = 300)
+
+umap_clusters <- DimPlot(obj,  group.by = "seurat_clusters", label = TRUE, cols = distinctColorPalette(length(unique(obj$seurat_clusters)))) 
+ggsave("umap_clusters_1st_round_2.png", plot = umap_clusters, width = 6, height = 5, dpi = 300)
+
+umap_clusters <- DimPlot(obj,  group.by = "SPECIMEN_TYPE", cols = my_colors) 
+ggsave("umap_clusters_1st_round_3.png", plot = umap_clusters, width = 6, height = 5, dpi = 300)
+
+umap_clusters <- DimPlot(obj,  group.by = "SOURCE_HOSPITAL", cols = my_colors) 
+ggsave("umap_clusters_1st_round_4.png", plot = umap_clusters, width = 6, height = 5, dpi = 300)
+
+umap_clusters <- DimPlot(obj,  group.by = "PROCESSING_TYPE", split.by="PROCESSING_TYPE", cols = my_colors, ncol=2) 
+ggsave("umap_clusters_1st_round_5.png", plot = umap_clusters, width = 15, height = 15, dpi = 300)
+
+umap_clusters <- DimPlot(obj,  group.by = "TISSUE_PROCESSING_TEAM", cols = my_colors) 
+ggsave("umap_clusters_1st_round_7.png", plot = umap_clusters, width = 6, height = 5, dpi = 300)
+
+umap_clusters <- DimPlot(obj,  group.by = "SINGLECELL_TYPE", cols = my_colors) 
+ggsave("umap_clusters_1st_round_6.png", plot = umap_clusters, width = 6, height = 5, dpi = 300)
+
+umap_clusters <- DimPlot(obj,  group.by = "PatientTypeID", cols = distinctColorPalette(length(unique(obj$PatientTypeID))))+NoLegend()
+ggsave("umap_clusters_1st_round_8.png", plot = umap_clusters, width = 6, height = 5, dpi = 300)
+
+
+obj[["percent.mt"]]   <- PercentageFeatureSet(obj, pattern = "^MT-")
+obj[["percent.ribo"]] <- PercentageFeatureSet(obj, pattern = "^RP[SL]")
+
+p <- FeaturePlot(obj,features = c("percent.ribo","percent.mt", "nFeature_RNA","nCount_RNA"),
+                 max.cutoff = "q98", ncol=2) & scale_color_viridis(option = "D") 
+
+ggsave(filename = paste0("qc.png"),
+       plot = p, width = 20, height = 12, dpi = 300)
+
+p <- FeaturePlot(obj,features = c("EPCAM", "KRT18", "RAMP2", "COL1A1", "ACTA2", "CD3E", "CD3G",
+                "CD68", "GZMB", "GZMK", "PRF1","IL7R","CD14", "C1QA", "LYZ",
+                "JCHAIN", "MS4A1", "CPA3", "S100B", "IRF7"),
+                 max.cutoff = "q98", ncol=5) & scale_color_viridis(option = "D") 
+
+ggsave(filename = paste0("markers.png"),
+       plot = p, width = 20, height = 12, dpi = 300)
+
+p <- FeaturePlot(obj,features = c("CD68","EPCAM", "COL1A1","CD3E","PRF1","GZMB","GZMK","IL7R","CD14","CPA3","VWF","CD79A","MS4A1"),
+                 max.cutoff = "q98", ncol=5) & scale_color_viridis(option = "D") 
+
+ggsave(filename = paste0("markers2.png"),
+       plot = p, width = 20, height = 12, dpi = 300)
+
+saveRDS(obj, "obj.rds")
+```
+
+# Find All Markers
+
+```{r Find Markers}
+markers <- FindAllMarkers(obj,
+                          only.pos = TRUE,
+                          test.use = "wilcox",
+                          min.pct = 0.25,
+                          logfc.threshold = 0.25)
+
+markers <- markers |>
+  filter(p_val_adj < 0.01, avg_log2FC > 1.25)
+
+write.csv(markers, "markers_first_round.csv")
+
+# Select top markers based on the ranking metric
+top_markers <- markers |>
+  group_by(cluster) |>
+  arrange(-avg_log2FC) |>
+  slice_head(n = 5) |>  # Select top 5 markers per group
+  ungroup()
+
+obj <- BuildClusterTree(
+  obj,
+  assay = "RNA",
+  features = unique(top_markers$gene),
+  dims = NULL,
+  slot = "data",
+  reorder = TRUE,
+  reorder.numeric = FALSE
+)
+
+top_markers$cluster <- factor(top_markers$cluster, levels = levels(Idents(obj)))
+top_markers <- top_markers[order(top_markers$cluster),]
+
+obj <- ScaleData(obj, features=top_markers$gene, split.by= "SINGLECELL_TYPE")
+
+# Downsample equally by patient_id and create the heatmap plot
+cols_lambda0 <- distinctColorPalette(length(unique(obj$seurat_clusters)))
+p_heatmap <- DoHeatmap(subset(obj, downsample = 400), features = top_markers$gene, group.colors = cols_lambda0) +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0,
+    limit = c(-2, 2),
+    name = "Expression",
+    oob = scales::squish
+  )
+
+# Save plot
+ggsave("1st_round_heatmap.png", plot = p_heatmap, width = 50, height = 60, units = "cm", dpi = 300)
+```
+
+```{r Heatmap v2}
+# Major clusters manual annotation
+cluster_gene_list <- list(
+  Epithelial = c("EPCAM", "KRT8", "KRT18", "KRT19", "CDH1", "MUC4", "CEACAM5", "CEACAM6"),
+  Endothelial = c("ENG", "FSCN1", "CAVIN2", "PECAM1", "CD34", "VWF", "RAMP2", "FLT1", "CDH5", "KDR"),
+  Fibroblast = c("ACTA2", "COL1A1", "COL1A2", "PDGFRA", "FAP", "POSTN"),
+  TNK_cell = c("CD3E", "CD3G", "CD3D", "CD8A","GZMA", "NKG7", "PRF1", "GNLY", "GZMB", "TRDC", "KLRD1",  "NKG7"),
+  Myeloid = c("SPP1", "FCGR3A", "C1QA", "C1QB", "C1QC", "CD14", "CSF1R", "CLEC4G", "ITGAM", "ITGAX", "LYZ"),
+  PlasmaB = c("MZB1", "JCHAIN", "IGHA1", "XBP1", "CD38", "CD138"),
+  B_cell = c("CD79A", "MS4A1", "CD19", "BANK1", "AICDA", "VPREB3"),
+  Mast = c("CPA3", "KIT", "TPSAB1", "HPGDS"),
+  Enteroglial = c("S100B", "PLP1", "NRXN1", "CDH19")
+)
+
+genes_to_plot <- unlist(cluster_gene_list, use.names = FALSE)
+
+## Downsample to 500 células
+obj_down <- subset(
+  obj,
+  cells = obj@meta.data |>
+    mutate(cell_name = rownames(.)) |>
+    group_by(seurat_clusters) |>
+    slice_sample(n = 500) |>
+    pull(cell_name)
+)
+
+pre_heatmap <- DoHeatmap(
+  obj_down,
+  features = genes_to_plot,
+  group.by = "seurat_clusters",
+) + scale_fill_gradient2(low = "blue", mid = "white", high = "red")
+
+ggsave("heatmap_clusters_1st_round.png", plot = pre_heatmap, width = 20, height = 8)
+```
+
+# Remove doublets
+
+## Doublet Finder
+
+```{r Doublet Finder 1, eval = FALSE}
+## scDblFinder
+sce <- scDblFinder(GetAssayData(obj, slot = "counts"),
+                    samples = obj$PatientTypeID)
+# Add results to Seurat object
+obj$scDblFinder.score <- sce$scDblFinder.score
+obj$scDblFinder.class <- colData(sce)$scDblFinder.class
+
+##########
+
+dbl_score <- read.csv("dbl_score_scDblFinder.csv")
+meta <- obj@meta.data |>
+  left_join(dbl_score, by = c("sampleID" = "sampleID"))
+obj@meta.data <- meta
+
+
+
+#############
+setwd("C:/Users/David Lopez/OneDrive - Universitat de Barcelona/PhD/4o Bloque/scRNA-Seq/Pelka et al")
+obj <- readRDS("obj.rds")
+# Validation
+obj@meta.data$celltype_dbl <- paste(
+  obj@meta.data$cell_type,
+  obj@meta.data$scDblFinder.class,
+  sep = "_"
+)
+set.seed(1234)
+obj_down <- subset(
+  obj,
+  cells = obj@meta.data |>
+    mutate(cell_name = rownames(.)) |>
+    group_by(celltype_dbl) |>
+    slice_sample(n = 1000) |>
+    pull(cell_name)
+)
+
+obj_down@meta.data$celltype_dbl <- factor(
+  obj_down@meta.data$celltype_dbl,
+  levels = unique(obj_down@meta.data$celltype_dbl[order(obj_down@meta.data$cell_type)])
+)
+
+# Extract expression matrix
+cluster_gene_list <- list(
+  Epithelial = c("EPCAM", "KRT8", "KRT18", "KRT19", "CDH1", "MUC4", "CEACAM5", "CEACAM6"),
+  Endothelial = c("ENG", "FSCN1", "CAVIN2", "PECAM1", "CD34", "VWF", "RAMP2", "FLT1", "CDH5", "KDR"),
+  Fibroblast = c("ACTA2", "COL1A1", "COL1A2", "PDGFRA", "FAP", "POSTN"),
+  TNK_cell = c("CD3E", "CD3G", "CD3D", "CD8A", "GZMA", "NKG7", "PRF1", "GNLY", "GZMB", "TRDC", "KLRD1", "NKG7"),
+  Myeloid = c("SPP1", "FCGR3A", "C1QA", "C1QB", "C1QC", "CD14", "CSF1R", "CLEC4G", "ITGAM", "ITGAX", "LYZ"),
+  PlasmaB = c("MZB1", "JCHAIN", "IGHA1", "XBP1", "CD38", "CD138"),
+  B_cell = c("CD79A", "MS4A1", "CD19", "BANK1", "AICDA", "VPREB3"),
+  Mast = c("CPA3", "KIT", "TPSAB1", "HPGDS"),
+  Enteroglial = c("S100B", "PLP1", "NRXN1", "CDH19")
+)
+genes_of_interest <- unlist(cluster_gene_list)
+genes_present <- intersect(genes_of_interest, rownames(GetAssayData(obj_down, slot = "data")))
+
+expr_matrix <- as.matrix(GetAssayData(obj_down, slot = "data")[genes_present, ])
+
+genes_scaled <- intersect(genes_present, rownames(GetAssayData(obj_down, slot = "scale.data")))
+scale_matrix <- as.matrix(GetAssayData(obj_down, slot = "scale.data")[genes_scaled, ])
+                         
+# Colors
+n_colors <- length(unique(obj_down$celltype_dbl))
+colors_extended <- colorRampPalette(brewer.pal(12, "Set3"))(n_colors)
+fa_col <- setNames(colors_extended, levels(obj_down$celltype_dbl))
+library(circlize)
+
+col_fun <- colorRamp2(
+  c(0, 1, 2),
+  c("blue", "white", "red")
+)
+
+# Heatmap (norm expression)
+dend2 <- cluster_within_group(expr_matrix, obj_down$celltype_dbl)
+comlplexh <- Heatmap(
+  expr_matrix,
+  cluster_columns = dend2,
+  column_split = length(unique(obj_down$celltype_dbl)),
+  show_column_names = FALSE,
+  col = col_fun,
+  row_names_gp = gpar(fontsize = 6),
+  column_title_gp = gpar(fontsize = 10),
+  column_title_rot = 45,
+  name = "Expression",
+  heatmap_legend_param = list(title_gp = gpar(fontsize = 8)),
+  use_raster = TRUE,
+  raster_quality = 2,
+  raster_device = "png"
+)
+png("doublet_validation_complexheatmap (new scale).png", width = 2000, height = 800, res = 150)
+draw(comlplexh)
+dev.off()
+
+col_fun2 <- colorRamp2(
+  c(0, 2, 4),  # range of values
+  c("blue", "white", "red")  # low-mid-high colors
+)
+
+# Heatmap (scaled data)
+dend2 <- cluster_within_group(scale_matrix, obj_down$celltype_dbl)
+comlplexh <- Heatmap(
+  scale_matrix,
+  cluster_columns = dend2,
+  column_split = length(unique(obj_down$celltype_dbl)),
+  show_column_names = FALSE,
+  col = col_fun,
+  row_names_gp = gpar(fontsize = 6),
+  column_title_gp = gpar(fontsize = 10),
+  column_title_rot = 45,
+  name = "Expression",
+  heatmap_legend_param = list(title_gp = gpar(fontsize = 8)),
+  use_raster = TRUE,
+  raster_quality = 2,
+  raster_device = "png"
+)
+png("doublet_validation_complexheatmap_scaled (new scale).png", width = 2000, height = 800, res = 150)
+draw(comlplexh)
+dev.off()
+
+# DoHeatmap
+dbl_comp <- DoHeatmap(
+  obj_down,
+  features = genes_of_interest,
+  group.by = "celltype_dbl",
+) + scale_fill_gradient2(low = "blue", mid ="white", high = "red")
+ggsave("doublet_validation_v2.png", dbl_comp, width = 20, height = 8)
+```
+
+## Manual / Visual
+
+```{r Doublet Finder}
+############# SCDBLFINDER !!!! ############# 
+obj$scDblFinder.class[obj$seurat_clusters == 30] <- "doublet"
+```
+
+# Manual Annotation
+
+```{r Manual annotation}
+#obj <- readRDS("obj_before_ctqc.rds")
+obj$cell_type <- case_when(
+  obj$seurat_clusters %in% c(0, 2, 20) ~ "TNK_cell",
+  obj$seurat_clusters %in% c(21, 26) ~ "Fibroblasts",
+  obj$seurat_clusters  %in% c(17, 29) ~ "Endothelial",
+  obj$seurat_clusters %in% c(7, 11, 14, 31) ~ "Myeloid",
+  obj$seurat_clusters %in% c(4, 25) ~ "B_cell",
+  obj$seurat_clusters %in% c(3, 12, 28) ~ "PlasmaB_cell",
+  obj$seurat_clusters == 22 ~ "Mast",
+  TRUE ~ "Epithelial"
+)
+
+umap_clusters <- DimPlot(obj, group.by = "cell_type", label = TRUE, raster = FALSE,
+                               repel = TRUE, cols = my_colors2, pt.size = 0.005) +  ggtitle("cell_type")
+ggsave("cell_type_1st_round.png", plot = umap_clusters, width = 8, height = 7)
+```
+
+# ctQC
+
+```{r ctQC Visualization Functions}
+######### Function 1
+plot_cluster_density2 <- function(seurat_obj, cluster_name, feat.min, feat.max,
+                                  mt.min, mt.max, cluster_col = "cell_type",
+                                  xvar = "nFeature_RNA", yvar = "percent.mt") {
+  
+  # Filer metadata directly by cluster
+  df <- seurat_obj@meta.data[seurat_obj@meta.data[[cluster_col]] == cluster_name, ]
+  
+  # Automatic limits
+  vline_min <- feat.min
+  hline_min <- mt.min
+  vline_max <- feat.max
+  hline_max <- mt.max
+  rect_limits <- c(feat.min, feat.max, mt.min, mt.max)
+  
+  # Plot
+  p <- ggplot(df, aes_string(x = xvar, y = yvar)) +
+    geom_point(alpha = 0.3, size = 0.5) +
+    geom_bin2d(bins = 300) +
+    scale_fill_viridis_c() +
+    xlim(0, NA) + ylim(0, NA) +
+    theme_bw() +
+    ggtitle(paste(cluster_name)) +
+    geom_vline(xintercept = vline_min, linetype = "dashed", color = "red", linewidth = 0.8) +
+    geom_hline(yintercept = hline_min, linetype = "dashed", color = "red", linewidth = 0.8) +
+    geom_vline(xintercept = vline_max, linetype = "dashed", color = "red", linewidth = 0.8) +
+    geom_hline(yintercept = hline_max, linetype = "dashed", color = "red", linewidth = 0.8)
+  
+  return(p)
+}
+
+######### Function 2
+plot_cluster_density <- function(seurat_obj, cluster_name, feat.min, feat.max,
+                                 mt.min, mt.max, cluster_col = "cell_type",
+                                 xvar = "nFeature_RNA", yvar = "percent.mt") {
+  
+  df <- seurat_obj@meta.data[seurat_obj@meta.data[[cluster_col]] == cluster_name, ]
+  
+  vline_min <- feat.min
+  hline_min <- mt.min
+  vline_max <- feat.max
+  hline_max <- mt.max
+  rect_limits <- c(feat.min, feat.max, mt.min, mt.max)
+  
+  p <- ggplot(df, aes_string(x = xvar, y = yvar)) +
+    geom_point(alpha = 0.3, size = 0.5) +
+    stat_density_2d(aes(fill = after_stat(level)), geom = "polygon", alpha = 1) +
+    scale_fill_viridis_c() +
+    xlim(0, NA) + ylim(0, NA) +
+    theme_bw() +
+    ggtitle(paste(cluster_name)) +
+    geom_vline(xintercept = vline_min, linetype = "dashed", color = "red", linewidth = 0.8) +
+    geom_hline(yintercept = hline_min, linetype = "dashed", color = "red", linewidth = 0.8) +
+    geom_vline(xintercept = vline_max, linetype = "dashed", color = "red", linewidth = 0.8) +
+    geom_hline(yintercept = hline_max, linetype = "dashed", color = "red", linewidth = 0.8)
+  
+  return(p)
+}
+
+######### Function 3
+plot_cluster_density3 <- function(seurat_obj, cluster_name, feat.min, feat.max,
+                                  mt.min, mt.max, cluster_col = "cell_type",
+                                  xvar = "nFeature_RNA", yvar = "percent.mt") {
+  
+  df <- seurat_obj@meta.data[seurat_obj@meta.data[[cluster_col]] == cluster_name, ]
+  
+  vline_min <- feat.min
+  hline_min <- mt.min
+  vline_max <- feat.max
+  hline_max <- mt.max
+  rect_limits <- c(feat.min, feat.max, mt.min, mt.max)
+  
+  p <- ggplot(df, aes_string(x = xvar, y = yvar)) +
+    geom_pointdensity(adjust = 0.5, size = 0.6, method= "kde2d") +
+    scale_fill_viridis_c() +
+    xlim(0, NA) + ylim(0, NA) +
+    theme_bw() +
+    ggtitle(paste(cluster_name)) +
+    geom_vline(xintercept = vline_min, linetype = "dashed", color = "red", linewidth = 0.8) +
+    geom_hline(yintercept = hline_min, linetype = "dashed", color = "red", linewidth = 0.8) +
+    geom_vline(xintercept = vline_max, linetype = "dashed", color = "red", linewidth = 0.8) +
+    geom_hline(yintercept = hline_max, linetype = "dashed", color = "red", linewidth = 0.8)
+  
+  return(p)
+}
+```
+
+```{r ctQC Graphs}
+#### FUNCTION 1 ####
+p1 <- plot_cluster_density2(seurat_obj = obj, cluster_name = "PlasmaB_cell",
+                            feat.min = 500, feat.max = 2500, mt.min = 0, mt.max = 10)
+p2 <- plot_cluster_density2(seurat_obj = obj, cluster_name = "TNK_cell",
+                            feat.min = 200, feat.max = 3000, mt.min = 1, mt.max = 12.5)
+p3 <- plot_cluster_density2(seurat_obj = obj, cluster_name = "Fibroblasts",
+                            feat.min = 750, feat.max = 3500, mt.min = 2, mt.max = 17.5)
+p4 <- plot_cluster_density2(seurat_obj = obj, cluster_name = "Epithelial",
+                            feat.min = 1000, feat.max = 9000, mt.min = 2, mt.max = 35)
+p5 <- plot_cluster_density2(seurat_obj = obj, cluster_name = "Myeloid",
+                            feat.min = 500, feat.max = 4250, mt.min = 2, mt.max = 15)
+p6 <- plot_cluster_density2(seurat_obj = obj, cluster_name = "Endothelial",
+                            feat.min = 750, feat.max = 3500, mt.min = 2, mt.max = 15)
+p7 <- plot_cluster_density2(seurat_obj = obj, cluster_name = "B_cell",
+                            feat.min = 200, feat.max = 1750, mt.min = 1, mt.max = 15) 
+p8 <- plot_cluster_density2(seurat_obj = obj, cluster_name = "Mast",
+                            feat.min = 200, feat.max = 1500, mt.min = 1.5, mt.max = 14)
+ctQC_plots <- p1 + p2 + p3 + p4 +
+              p5 + p6 + p7 + p8 +
+              plot_layout(ncol = 4, nrow = 2) & 
+              theme(legend.text = element_text(size = 6),
+                    legend.title = element_text(size = 7)) &
+              guides(
+                fill = guide_colorbar(barwidth = 0.5, barheight = 4),
+                color = guide_colorbar(barwidth = 0.5, barheight = 4)
+              )
+
+ggsave("ctQC_plots.png", plot = ctQC_plots, width = 20, height = 12)
+
+
+#### FUNCTION 2 ####
+p1 <- plot_cluster_density(seurat_obj = obj, cluster_name = "PlasmaB_cell",
+                            feat.min = 500, feat.max = 2500, mt.min = 0, mt.max = 10)
+p2 <- plot_cluster_density(seurat_obj = obj, cluster_name = "TNK_cell",
+                            feat.min = 200, feat.max = 3000, mt.min = 1, mt.max = 12.5)
+p3 <- plot_cluster_density(seurat_obj = obj, cluster_name = "Fibroblasts",
+                            feat.min = 750, feat.max = 3500, mt.min = 2, mt.max = 17.5)
+p4 <- plot_cluster_density(seurat_obj = obj, cluster_name = "Epithelial",
+                            feat.min = 1000, feat.max = 9000, mt.min = 2, mt.max = 35)
+p5 <- plot_cluster_density(seurat_obj = obj, cluster_name = "Myeloid",
+                            feat.min = 500, feat.max = 4250, mt.min = 2, mt.max = 15)
+p6 <- plot_cluster_density(seurat_obj = obj, cluster_name = "Endothelial",
+                            feat.min = 750, feat.max = 3500, mt.min = 2, mt.max = 15)
+p7 <- plot_cluster_density(seurat_obj = obj, cluster_name = "B_cell",
+                            feat.min = 200, feat.max = 1750, mt.min = 1, mt.max = 15)
+p8 <- plot_cluster_density(seurat_obj = obj, cluster_name = "Mast",
+                            feat.min = 200, feat.max = 1500, mt.min = 1.5, mt.max = 14)
+
+ctQC_plots <- p1 + p2 + p3 + p4 +
+              p5 + p6 + p7 + p8 +
+              plot_layout(ncol = 4, nrow = 2) & 
+              theme(legend.text = element_text(size = 6),
+                    legend.title = element_text(size = 7)) &
+              guides(
+                fill = guide_colorbar(barwidth = 0.5, barheight = 4),
+                color = guide_colorbar(barwidth = 0.5, barheight = 4)
+              )
+
+ggsave("ctQC_plots_density.png", plot = ctQC_plots, width = 20, height = 12)
+
+#### FUNCTION 3 ####
+p1 <- plot_cluster_density3(seurat_obj = obj, cluster_name = "PlasmaB_cell",
+                            feat.min = 500, feat.max = 2500, mt.min = 0, mt.max = 10)
+p2 <- plot_cluster_density3(seurat_obj = obj, cluster_name = "TNK_cell",
+                            feat.min = 200, feat.max = 3000, mt.min = 1, mt.max = 12.5)
+p3 <- plot_cluster_density3(seurat_obj = obj, cluster_name = "Fibroblasts",
+                            feat.min = 750, feat.max = 3500, mt.min = 2, mt.max = 17.5)
+p4 <- plot_cluster_density3(seurat_obj = obj, cluster_name = "Epithelial",
+                            feat.min = 1000, feat.max = 9000, mt.min = 2, mt.max = 35)
+p5 <- plot_cluster_density3(seurat_obj = obj, cluster_name = "Myeloid",
+                            feat.min = 500, feat.max = 4250, mt.min = 2, mt.max = 15)
+p6 <- plot_cluster_density3(seurat_obj = obj, cluster_name = "Endothelial",
+                            feat.min = 750, feat.max = 3750, mt.min = 2, mt.max = 14)
+p7 <- plot_cluster_density3(seurat_obj = obj, cluster_name = "B_cell",
+                            feat.min = 200, feat.max = 1750, mt.min = 1, mt.max = 15)
+p8 <- plot_cluster_density3(seurat_obj = obj, cluster_name = "Mast",
+                            feat.min = 200, feat.max = 1500, mt.min = 1.5, mt.max = 14)
+
+ctQC_plots <- p1 + p2 + p3 + p4 +
+              p5 + p6 + p7 + p8 +
+              plot_layout(ncol = 4, nrow = 2) & 
+              theme(legend.text = element_text(size = 6),
+                    legend.title = element_text(size = 7)) &
+              guides(
+                fill = guide_colorbar(barwidth = 0.5, barheight = 4),
+                color = guide_colorbar(barwidth = 0.5, barheight = 4)
+              )
+
+ggsave("ctQC_plots_v3.png", plot = ctQC_plots, width = 20, height = 12)
+
+######################
+
+# Violin Plot
+df <- obj_ctqc@meta.data |>
+  mutate(NODG = nFeature_RNA)
+
+ref_lines <- df |>
+  group_by(cell_type) |>
+  summarise(median_NODG = median(NODG, na.rm = TRUE)) |>
+  mutate(upper = 2 * median_NODG,
+         lower = 0.5 * median_NODG)
+
+Vlnplot_clusters <- ggplot(df, aes(x = PatientTypeID, y = NODG, fill = PatientTypeID)) +
+  geom_hline(data = ref_lines, aes(yintercept = median_NODG), 
+             color = "red", linetype = "solid", size = 1) +
+  geom_hline(data = ref_lines, aes(yintercept = upper), 
+             color = "blue", linetype = "dashed", size = 0.8) +
+  geom_hline(data = ref_lines, aes(yintercept = lower), 
+             color = "blue", linetype = "dashed", size = 0.8) +
+  geom_violin(trim = TRUE, scale = "width") +
+  facet_wrap(~ cell_type, ncol = 1, scales = "free_y") +  # apilados
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+    legend.text = element_text(size = 6), legend.title = element_text(size = 7)
+  ) +
+  labs(x = "Sample", y = "NODG", fill = "Patient") +
+  scale_fill_viridis_d(option = "turbo", 
+                       guide = guide_legend(ncol = 2)
+  )
+
+
+ggsave("Vlnplot_clusters.png", Vlnplot_clusters, width = 20, height = 15)
+```
+
+```{r Filter Reason}
+saveRDS(obj, "obj.rds")
+
+cluster_thresholds <- data.frame(
+  cluster = c("PlasmaB_cell", "TNK_cell", "Fibroblasts", "Epithelial",
+              "Myeloid", "Endothelial", "B_cell", "Mast"),
+  feat.min = c(500, 200, 750, 1000, 500, 750, 200, 200),
+  feat.max = c(2500, 3000, 3500, 9000, 4250, 3500, 1750, 1500),
+  mt.min   = c(0, 1, 2, 2, 2, 2, 1, 1.5),
+  mt.max   = c(10, 12.5, 17.5, 35, 15, 15, 15, 14)
+)
+
+# Inicialmente, marcar todas las células como "keep"
+Idents(object = obj) <- 'cell_type'
+obj@meta.data$filter_reason <- "keep"
+
+# Iterar por cada cluster y asignar motivos
+for (i in seq_len(nrow(cluster_thresholds))) {
+  clust <- cluster_thresholds$cluster[i]
+  cells_in_clust <- WhichCells(obj, idents = clust)
+  meta_sub <- obj@meta.data[cells_in_clust, ]
+
+  
+  # Asignar razones de filtrado
+  reason <- case_when(
+    meta_sub$scDblFinder.class == "doublet" ~ "Doublet", 
+    meta_sub$nFeature_RNA > cluster_thresholds$feat.max[i] & meta_sub$percent.mt > cluster_thresholds$mt.max[i] ~ "high_NDOG + high_mito",
+    meta_sub$nFeature_RNA < cluster_thresholds$feat.min[i] ~ "low_NDOG",
+    meta_sub$nFeature_RNA > cluster_thresholds$feat.max[i] ~ "high_NDOG",
+    meta_sub$percent.mt < cluster_thresholds$mt.min[i]     ~ "low_mito",
+    meta_sub$percent.mt > cluster_thresholds$mt.max[i]     ~ "high_mito",
+    TRUE ~ "keep"
+  )
+  
+  obj@meta.data[cells_in_clust, "filter_reason"] <- reason
+}
+
+# Subset object with "pass" cells
+cells_to_keep <- rownames(obj@meta.data)[obj@meta.data$filter_reason == "keep"]
+
+keep_cells <- DimPlot(obj, group.by = "filter_reason", raster = FALSE,
+                      cols = my_colors2, pt.size = 0.01) +  ggtitle("filter_reason") +
+  theme(plot.title = element_text(size = 32, face = "bold"),
+    axis.title = element_text(size = 28), axis.text = element_text(size = 24),
+    legend.title = element_text(size = 26), legend.text = element_text(size = 22)
+  )
+ggsave("umap_keep_cells_dbl.png", plot = keep_cells, width = 16, height = 14)
+
+# Plot filter reason
+filter_reason_barplot <- ggplot(obj@meta.data, aes(x = cell_type, fill = filter_reason)) +
+  geom_bar(position = "stack") +
+  scale_fill_manual(values = my_colors2) +
+  theme_bw() +
+  labs(x = "Cluster", y = "Cells", fill = "Filter reason")
+
+ggsave("barplot_filter_reason_dbl.png", filter_reason_barplot, width = 10)
+
+filter_reason_percent_barplot <- ggplot(obj@meta.data, aes(x = cell_type, fill = filter_reason)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = my_colors2) +
+  theme_bw() +
+  labs(
+    x = "Cell type",
+    y = "Percentage of cells",
+    fill = "Filter reason"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+ggsave("barplot_percent_filter_reason_dbl.png", filter_reason_percent_barplot, width = 10)
+
+filter_reason_sample_cell <- ggplot(obj@meta.data, aes(x = orig.ident, fill = filter_reason)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = my_colors2) +
+  facet_wrap(~ cell_type, scales = "free_x") +
+  theme_bw() +
+  labs(
+    x = "Sample ID",
+    y = "Percentage of cells",
+    fill = "Filter reason"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 6),
+    strip.text = element_text(size = 8)
+  )
+ggsave("filter_reason_sample_cell.png", filter_reason_sample_cell, width = 20)
+
+celltype_barplot <- ggplot(obj@meta.data, aes(x = orig.ident, fill = cell_type)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = my_colors2) +
+  theme_bw() +
+  labs(
+    x = "Sample ID (orig.ident)",
+    y = "Percentage of cells",
+    fill = "Cell type"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8)
+  )
+ggsave("celltype_barplot_pre_ctqc_dbl.png", celltype_barplot, width = 12)
+
+obj_ctqc <- subset(obj, subset = filter_reason == "keep")
+
+celltype_barplot <- ggplot(obj_ctqc@meta.data, aes(x = orig.ident, fill = cell_type)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = my_colors2) +
+  theme_bw() +
+  labs(
+    x = "Sample ID (orig.ident)",
+    y = "Percentage of cells",
+    fill = "Cell type"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 8)
+  )
+ggsave("celltype_barplot_post_ctqc_dbl.png", celltype_barplot, width = 12)
+```
+
+# Post-ctQC
+
+```{r Post-ctQC Analysis}
+#2nd round of clustering
+VariableFeatures(obj_ctqc) <- split(row.names(obj_ctqc@meta.data), obj_ctqc@meta.data$SINGLECELL_TYPE) |> lapply(function(cells_use) {
+  obj_ctqc[,cells_use] |>
+    FindVariableFeatures(selection.method = "vst", nfeatures = 2000) |> 
+    VariableFeatures()
+}) |> unlist |> unique
+
+obj_ctqc <- obj_ctqc |> 
+  ScaleData(verbose = FALSE) |> 
+  RunPCA(features = VariableFeatures(obj_ctqc), npcs = 20, verbose = FALSE)
+
+obj_ctqc <- RunHarmony(obj_ctqc, "SINGLECELL_TYPE")
+obj_ctqc <- FindNeighbors(obj_ctqc, dims=1:16, reduction="harmony")
+obj_ctqc <- FindClusters(obj_ctqc, res=0.8)
+obj_ctqc <- RunUMAP(obj_ctqc, dims= 1:16, reduction="harmony")
+
+
+umap_clusters <- DimPlot(obj_ctqc,  group.by = "clTopLevel", label = TRUE, cols = distinctColorPalette(length(unique(obj_ctqc$clTopLevel)))) 
+ggsave("umap_clusters_2nd_round_fbl.png", plot = umap_clusters, width = 6, height = 5, dpi = 300)
+
+umap_clusters <- DimPlot(obj_ctqc,  group.by = "seurat_clusters", label = TRUE, cols = distinctColorPalette(length(unique(obj_ctqc$seurat_clusters)))) 
+ggsave("umap_clusters_2nd_round_2_dbl.png", plot = umap_clusters, width = 6, height = 5, dpi = 300)
+
+umap_clusters <- DimPlot(obj_ctqc,  group.by = "SINGLECELL_TYPE", cols = distinctColorPalette(length(unique(obj_ctqc$SINGLECELL_TYPE)))) 
+ggsave("umap_clusters_2nd_round_3_dbl.png", plot = umap_clusters, width = 6, height = 5, dpi = 300)
+
+p <- FeaturePlot(obj_ctqc,features = c("EPCAM", "KRT18", "RAMP2", "COL1A1", "ACTA2", "CD3E", "CD3G",
+                "CD68", "GZMB", "GZMK", "PRF1","IL7R","CD14", "C1QA", "LYZ",
+                "JCHAIN", "MS4A1", "CPA3", "S100B", "IRF7"),
+                 max.cutoff = "q98", ncol=5) & scale_color_viridis(option = "D") 
+
+ggsave(filename = paste0("markers_2nd_round.png"),
+       plot = p, width = 20, height = 12, dpi = 300)
+
+p <- FeaturePlot(obj_ctqc,features = c("CD68","EPCAM", "COL1A1","CD3E","PRF1","GZMB","GZMK","IL7R","CD14","CPA3","VWF","CD79A","MS4A1"),
+                 max.cutoff = "q98", ncol=5) & scale_color_viridis(option = "D") 
+
+ggsave(filename = paste0("markers2_2nd_round.png"),
+       plot = p, width = 20, height = 12, dpi = 300)
+
+saveRDS(obj_ctqc, "obj_ctqc_dbl_removed.rds")
+```
+
+```{r Find Markers 2nd Rounds}
+##Find markers 
+markers <- FindAllMarkers(obj_ctqc,
+                          only.pos = TRUE,
+                          test.use = "wilcox",
+                          min.pct = 0.25,
+                          logfc.threshold = 0.25)
+
+markers <- markers |>
+  filter(p_val_adj < 0.01, avg_log2FC > 1.25)
+
+write.csv(markers, "markers_second_round_dbl.csv")
+
+top_markers <- markers |>
+  group_by(cluster) |>
+  arrange(-avg_log2FC) |>
+  slice_head(n = 5) |>
+  ungroup()
+
+obj_ctqc <- BuildClusterTree(
+  obj_ctqc,
+  assay = "RNA",
+  features = unique(top_markers$gene),
+  dims = NULL,
+  slot = "data",
+  reorder = TRUE,
+  reorder.numeric = FALSE
+)
+
+top_markers$cluster <- factor(top_markers$cluster, levels = levels(Idents(obj_ctqc)))
+top_markers <- top_markers[order(top_markers$cluster),]
+
+obj_ctqc <- ScaleData(obj_ctqc, features=top_markers$gene, split.by= "SINGLECELL_TYPE")
+
+# Downsample equally by patient_id and create the heatmap plot
+cols_lambda0 <- distinctColorPalette(length(unique(obj_ctqc$seurat_clusters)))
+p_heatmap <- DoHeatmap(subset(obj_ctqc, downsample = 400), features = top_markers$gene, group.colors = cols_lambda0) +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0,
+    limit = c(-2, 2),
+    name = "Expression",
+    oob = scales::squish
+  )
+
+# Save the plot using ggsave with high resolution and proper dimensions
+ggsave("2nd_round_heatmap_dbl.png", plot = p_heatmap, width = 50, height = 60, units = "cm", dpi = 300)
+```
+
+```{r}
+obj_ctqc <- readRDS("obj_ctqc_dbl_removed.rds")
+obj_ctqc$cell_type <- case_when(
+  obj_ctqc$seurat_clusters %in% c(0, 3, 6, 20, 36) ~ "TNK_cell",
+  obj_ctqc$seurat_clusters %in% c(21, 28, 37) ~ "Fibroblasts",
+  obj_ctqc$seurat_clusters == 18 ~ "Endothelial",
+  obj_ctqc$seurat_clusters %in% c(5, 10, 25, 29) ~ "Myeloid",
+  obj_ctqc$seurat_clusters %in% c(2, 27) ~ "B_cell",
+  obj_ctqc$seurat_clusters %in% c(1, 13, 32, 35) ~ "PlasmaB_cell",
+  obj_ctqc$seurat_clusters == 24 ~ "Mast",
+  TRUE ~ "Epithelial"
+)
+
+umap_clusters <- DimPlot(obj_ctqc, group.by = "cell_type", label = TRUE, raster = FALSE,
+                               repel = TRUE, cols = my_colors2, pt.size = 0.01) +  ggtitle("cell_type")
+ggsave("cell_type_2nd_round_dbl.png", plot = umap_clusters, width = 8, height = 7)
+
+saveRDS(obj_ctqc, "major_cell_type_annotation_final_29_10_25.rds")
+```
+
+# Subsetting
+
+```{r Subsetting into Epithelial, Immune and Stromal}
+obj_ctqc <- readRDS("major_cell_type_annotation_final_29_10_25.rds")
+obj_ctqc$MCT3 <- dplyr::case_when(
+  obj_ctqc$cell_type %in% c("Epithelial") ~ "Epithelial",
+  obj_ctqc$cell_type %in% c("B cell", "Mast", "Myeloid", "PlasmaB cell", "TNK cell") ~ "Immune",
+  obj_ctqc$cell_type %in% c("Endothelial", "Fibroblasts") ~ "Stromal",
+  TRUE ~ "Other"
+)
+
+#epi_cells <- WhichCells(obj_ctqc, expression = MCT3 == "Epithelial")
+#obj_ctqc_epi  <- subset(obj_ctqc, cells = epi_cells)
+#saveRDS(obj_ctqc_epi, "obj_ctqc_epi.rds")
+
+immune_cells <- WhichCells(obj_ctqc, expression = MCT3 == "Immune")
+obj_ctqc_immune  <- subset(obj_ctqc, cells = immune_cells)
+saveRDS(obj_ctqc_immune, "obj_ctqc_immune.rds")
+
+#stromal_cells <- WhichCells(obj_ctqc, expression = MCT3 == "Stromal")
+#obj_ctqc_stromal  <- subset(obj_ctqc, cells = stromal_cells)
+#saveRDS(obj_ctqc_stromal, "obj_ctqc_stromal.rds")
+```
+
+# Immune
+
+```{r Immune Analysis}
+#obj_ctqc_immune <- readRDS("obj_ctqc_immune.rds")
+obj_ctqc_immune <- FindVariableFeatures(obj_ctqc_immune)
+obj_ctqc_immune <- ScaleData(obj_ctqc_immune, split.by = "SINGLECELL_TYPE")
+obj_ctqc_immune <- RunPCA(obj_ctqc_immune)
+
+## Visualize PCA
+png("Heatmap_PC_immune.png", width = 1200, height = 900, res = 150)
+DimHeatmap(obj_ctqc_immune, dims = 1:9, nfeatures = 20, cells = 500, balanced = TRUE)
+dev.off()
+
+elbow_plot_immune <- ElbowPlot(obj_ctqc_immune, ndims = 50, reduction = "pca")
+ggsave("elbow_plot_immune.png", elbow_plot_immune)
+
+################ DIMENSIONS TESTING #########################
+
+dims_list <- list(1:10, 1:13, 1:15, 1:17, 1:20)
+
+for (d in dims_list) {
+  # Crear nombre único para reducción y archivo
+  d_start <- d[1]
+  d_end <- d[length(d)]
+  red_name <- paste0("umap_", d_start, "_", d_end)
+  red_key <- paste0("UMAP", d_start, "_", d_end, "_")
+
+  # FindNeighbors + RunUMAP
+  obj_ctqc_immune <- FindNeighbors(obj_ctqc_immune, reduction = "pca", dims = d)
+  obj_ctqc_immune <- RunUMAP(obj_ctqc_immune, reduction = "pca", dims = d,
+                         reduction.name = red_name, reduction.key = red_key, verbose = FALSE,
+  )
+
+  # Plot
+  p <- DimPlot(obj_ctqc_immune, group.by = "cell_type", reduction = red_name,
+               label = TRUE, repel = TRUE, cols = my_colors2) +
+    ggtitle(paste0("Dims: ", d_start, "-", d_end))
+
+  # Save
+  file_name <- paste0("UMAP_immune_dims_", d_start, "_", d_end, ".png")
+  ggsave(filename = file_name, plot = p, width = 8, height = 6, dpi = 300)
+}
+
+################ RESOLUTION TESTING #########################
+
+obj_ctqc_immune <- FindNeighbors(obj_ctqc_immune, reduction = "pca", dims = 1:15)
+obj_ctqc_immune <- RunUMAP(obj_ctqc_immune, reduction = "pca", dims = 1:15, verbose = FALSE)
+resolutions <- c(0.1, 0.4, 0.6, 0.8, 1)
+umap_plots <- list()
+
+# UMAPs at differente resolutions
+for (res in resolutions) {
+  # Clustering
+  obj_ctqc_immune <- FindClusters(obj_ctqc_immune, resolution = res)
+  cluster_col <- paste0("RNA_snn_res.", res)
+  obj_ctqc_immune@meta.data[[cluster_col]] <- as.numeric(as.character(obj_ctqc_immune@meta.data[[cluster_col]]))
+  
+  p <- DimPlot(obj_ctqc_immune, group.by = cluster_col, label = TRUE, repel = TRUE, raster = FALSE,
+               cols = distinctColorPalette(length(unique(obj_ctqc_immune@meta.data[[cluster_col]])))) +
+    ggtitle(paste0("Resolution ", res))
+  umap_plots[[as.character(res)]] <- p
+  
+  n_clusters <- length(unique(obj_ctqc_immune@meta.data[[cluster_col]]))
+  message("Resolution ", res, ": ", n_clusters, " clusters")
+  
+  ggsave(filename = paste0("umap_immune_res_", res, ".png"), plot = p, width = 8, height = 7)
+}
+
+#saveRDS(obj_ctqc_immune, "obj_ctqc_immune.rds")
+#srat_pelkaw <- readRDS("srat_pelkaw_harmony.rds")
+```
+
+```{r Find All Markers Immune}
+
+res_cols <- grep("^RNA_snn_res\\.", colnames(obj_ctqc_immune@meta.data), value = TRUE)
+
+for (col in res_cols) {
+  message("Processing: ", col)
+  
+  Idents(obj_ctqc_immune) <- col
+  
+  markers <- FindAllMarkers(
+    obj_ctqc_immune,
+    only.pos = TRUE,
+    test.use = "wilcox",
+    min.pct = 0.25,
+    logfc.threshold = 0.25
+  ) |>
+    filter(p_val_adj < 0.01, avg_log2FC > 1.25)
+  
+  file_name <- paste0("markers_", col, ".csv")
+  write.csv(markers, file_name, row.names = FALSE)
+}
+
+# Analysis
+marker_files <- list.files(pattern = "^markers_RNA_snn_res.*\\.csv$")
+
+for (file in marker_files) {
+  message("Processing: ", file)
+  markers <- read.csv(file)
+  
+  ## Extract resolution
+  res <- gsub("markers_RNA_snn_res\\.|\\.csv", "", file)
+  cluster_col <- paste0("RNA_snn_res.", res)
+  
+  ## Change identity
+  Idents(obj_ctqc_immune) <- obj_ctqc_immune@meta.data[[cluster_col]]
+  
+  ## Select top markers based on the ranking metric
+  top_markers <- markers |>
+    group_by(cluster) |>
+    arrange(-avg_log2FC) |>
+    slice_head(n = 5) |>
+    ungroup()
+
+  obj_ctqc_immune2 <- BuildClusterTree(
+    obj_ctqc_immune,
+    assay = "RNA",
+    features = unique(top_markers$gene),
+    dims = NULL,
+    slot = "data",
+    reorder = TRUE,
+    reorder.numeric = FALSE
+  )
+  
+  top_markers$cluster <- factor(top_markers$cluster, levels = levels(Idents(obj_ctqc_immune2)))
+  top_markers <- top_markers[order(top_markers$cluster), ]
+  
+  # Scale Data
+  obj_ctqc_immune2 <- ScaleData(obj_ctqc_immune2, features = top_markers$gene)
+  
+  # Heatmap
+  p_heatmap <- DoHeatmap(subset(obj_ctqc_immune2, downsample = 500), features = top_markers$gene) +
+    scale_fill_gradient2(
+      low = "blue", mid = "white", high = "red",
+      midpoint = 0, limit = c(-2, 2),
+      name = "Expression", oob = scales::squish
+    )
+  
+  heatmap_file <- paste0(tools::file_path_sans_ext(file), "_heatmap.png")
+  ggsave(heatmap_file, plot = p_heatmap, width = 50, height = 60, units = "cm", dpi = 300)
+}
+```

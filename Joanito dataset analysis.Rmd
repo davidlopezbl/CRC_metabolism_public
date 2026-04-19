@@ -1,0 +1,2189 @@
+---
+title: "Joanito post analysis"
+author: "David López"
+date: "2025-11-19"
+output: html_document
+---
+
+```{r packages, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+packages <- c(
+  "Seurat", "SeuratObject", "dplyr", "ggplot2", "DoubletFinder",
+  "harmony", "celldex", "SingleR", "BiocParallel", "tidyverse", "magrittr",
+  "data.table", "gridExtra", "gdata", "RColorBrewer", "SingleCellExperiment",
+  "pheatmap", "ComplexHeatmap", "EnhancedVolcano", "scGate", "S4Vectors",
+  "corrplot", "ggthemes", "cowplot", "scRNAseq", "scuttle", "SummarizedExperiment",
+  "scran", "scater", "clustree", "openxlsx", "tidyplots", "convert2anndata",
+  "dittoSeq", "clusterProfiler", "enrichplot", "ggmin", "org.Hs.eg.db",
+  "scMetabolism", "rsvd", "viridis", "patchwork", "presto", "UCell", "Matrix",
+  "remotes", "RCAv2", "DUBStepR", "DESeq2", "fgsea", "apeglm", "pathview",
+  "future", "progressr", "readxl", "proxy", "ashr", "SeuratDisk", "GEOquery",
+  "kBET", "rcartocolor", "AUCell", "randomcoloR", "presto", "scDblFinder",
+  "ggpointdensity", "purrr", "scales", "MAST"
+)
+
+# Cargar todas
+lapply(packages, require, character.only = TRUE)
+
+my_colors <- c("#1E938B", "#FFA844", "#67BB6B", "#E03B3B", "#C580CC", "#8A4CD6", 
+              "#A8A6E2", "#AB307D", "#E96767", "#1D6FAD", "#ACAC26", "#8B7E77", "#82C5B2")
+
+my_colors2 <- c("#1E938B", "#E03B3B", "#67BB6B", "#C580CC", "#FFA844", "#8A4CD6", 
+              "#A8A6E2", "#AB307D", "#8B7E77", "#E96767",  "#1D6FAD")
+```
+
+# Load data
+
+```{r Load data}
+# Load data
+srat <- readRDS("C:/Users/David Lopez/OneDrive - Universitat de Barcelona/PhD/4o Bloque/scRNA-Seq/Joanito et al/combObj_newData_final_doubletRemoved_clustered_373058_AddBoMetadata_369059finalcell_050824.rds")
+```
+
+## Rename clusters
+
+```{r Rename MCT}
+srat <- FindNeighbors(srat, dims=1:15)
+srat <- FindClusters(srat, res=0.5)
+
+srat$David_MCT <- dplyr::case_when(
+  srat$seurat_clusters %in% c(2, 12, 17, 21) ~ "PlasmaB",
+  srat$seurat_clusters %in% c(4, 20, 22) ~ "B",
+  srat$seurat_clusters %in% c(7, 11, 13, 18) ~ "Epithelial",
+  srat$seurat_clusters == 24 ~ "Mast",
+  srat$seurat_clusters %in% c(9, 14, 15, 16, 26) ~ "Fibroblast",
+  srat$seurat_clusters == 10 ~ "Endothelial",
+  srat$seurat_clusters == 23 ~ "Entericglial",
+  srat$seurat_clusters %in% c(3, 8) ~ "Myeloid",
+  srat$seurat_clusters == 25 ~ "Neutrophil",
+  srat$seurat_clusters == 28 ~ "pDC",
+  srat$seurat_clusters %in% c(0, 1, 5, 6, 19, 27) ~ "TNKILC",
+  TRUE ~ "Other"
+)
+
+umap_plot <- DimPlot(srat, group.by = "David_MCT", label = TRUE, raster = FALSE, cols = my_colors2, pt.size = 0.01)
+ggsave("joanito_MCT.png", plot = umap_plot, width = 10, height = 9)
+```
+
+## Subsetting
+
+```{r}
+tnk_cells <- WhichCells(srat, expression = David_MCT == "TNKILC")
+srat_tnk  <- subset(srat, cells = tnk_cells)
+
+myeloid_cells <- WhichCells(srat, expression = David_MCT %in% c("Myeloid", "pDC", "Neutrophil"))
+srat_myeloid  <- subset(srat, cells = myeloid_cells)
+
+stromal_cells <- WhichCells(srat, expression = David_MCT %in% c("Fibroblast", "Endothelial"))
+srat_stromal  <- subset(srat, cells = stromal_cells)
+
+epi_cells <- WhichCells(srat, expression = MCT == "Epithelial")
+srat_epi  <- subset(srat, cells = epi_cells)
+
+saveRDS(srat_tnk, "joanito_tnk_251119.rds")
+saveRDS(srat_myeloid, "joanito_myeloid_251119.rds")
+saveRDS(srat_stromal, "joanito_stromal_251119.rds")
+saveRDS(srat_epi, "joanito_epithelial_251119.rds")
+
+######### REST OF THE CELLS #########
+other_cells <- WhichCells(srat, expression = David_MCT %in% c("B", "PlasmaB", "Entericglial", "Mast"))
+srat_other  <- subset(srat, cells = other_cells)
+other_meta <- srat_other@meta.data
+other_meta$cell.id <- rownames(other_meta)
+other_meta <- other_meta |>
+  dplyr::select(cell.id, David_MCT)
+write.csv(other_meta, "rest_cell_full_annotation_to_merge.csv")
+saveRDS(srat_other, "joanito_rest_cells_251120.rds")
+```
+
+# Myeloid
+
+```{r Myeloid - Analysis}
+srat_myeloid <- readRDS("C:/Users/David Lopez/OneDrive - Universitat de Barcelona/PhD/4o Bloque/scRNA-Seq/Joanito et al/joanito_myeloid_251119.rds")
+
+VariableFeatures(srat_myeloid) <- split(row.names(srat_myeloid@meta.data), srat_myeloid@meta.data$dataset) |> lapply(function(cells_use) {
+  srat_myeloid[,cells_use] |>
+    FindVariableFeatures(selection.method = "vst", nfeatures = 2000) |> 
+    VariableFeatures()
+}) |> unlist |> unique
+
+srat_myeloid <- srat_myeloid |> 
+  ScaleData(verbose = FALSE) |> 
+  RunPCA(features = VariableFeatures(srat_myeloid), npcs = 50, verbose = FALSE)
+
+srat_myeloid <- RunHarmony(srat_myeloid, "dataset")
+srat_myeloid <- FindNeighbors(srat_myeloid, dims=1:20, reduction="harmony") #default: dims=15
+srat_myeloid <- RunUMAP(srat_myeloid, dims= 1:20, reduction="harmony")
+srat_myeloid <- FindClusters(srat_myeloid, res=0.5)
+
+umap_clusters <- DimPlot(srat_myeloid,  group.by = "seurat_clusters", label = TRUE, cols = distinctColorPalette(length(unique(srat_myeloid$seurat_clusters)))) 
+ggsave("myeloid_seurat_clusters_dim20.png", plot = umap_clusters, width = 8, height = 7, dpi = 300)
+
+umap_clusters <- DimPlot(srat_myeloid,  group.by = "dataset", label = FALSE, cols = my_colors2)
+ggsave("myeloid_datasets_dim20.png", plot = umap_clusters, width = 8, height = 7, dpi = 300)
+
+#saveRDS(srat_myeloid, "joanito_myeloid_251119.rds")
+
+# Myeloid markers_immune 
+p <- FeaturePlot(srat_myeloid, features = c("CD14", "CD68", "S100A8", "PLAUR", "TREM2", "C1QC", "SPP1", "CXCL9", "GPNMB", "MARCO", "CD163", "LYVE1", "IL6", "IL1A", "CXCL3"),max.cutoff = "q98", ncol=5) & scale_color_viridis(option = "D") 
+ggsave(filename = "myeloid_markers_new_dim20_251125.png", plot = p, width = 15, height = 22, dpi = 300)
+
+##### 1st Annotation
+srat_myeloid$David_CT1 <- dplyr::case_when(
+  srat_myeloid$seurat_clusters %in% c(0, 8) ~ "Macro TREM2+_C1QC+",
+  srat_myeloid$seurat_clusters %in% c(2, 4, 7) ~ "Monocyte",
+  srat_myeloid$seurat_clusters %in% c(5, 10, 12) ~ "cDC",
+  srat_myeloid$seurat_clusters == 1 ~ "Macro SPP1+",
+  srat_myeloid$seurat_clusters == 3 ~ "Macro LYVE1+",
+  srat_myeloid$seurat_clusters == 8 ~ "Neutrophil",
+  srat_myeloid$seurat_clusters == 9 ~ "Cycling Myeloid",
+  srat_myeloid$seurat_clusters == 11 ~ "pDC",
+  srat_myeloid$seurat_clusters == 13 ~ "Contaminant",
+  TRUE ~ "Other"
+)
+
+#saveRDS(srat_myeloid, "joanito_myeloid_251119.rds")
+
+myeloid_cells <- WhichCells(srat_myeloid, expression = David_CT1 != "Contaminant")
+srat_myeloid_clean  <- subset(srat_myeloid, cells = myeloid_cells)
+
+umap_clusters <- DimPlot(srat_myeloid_clean,  group.by = "David_CT1", label = TRUE, repel = TRUE, cols = my_colors2, label.size = 4)
+ggsave("myeloid_datasets_David_CT1.png", plot = umap_clusters, width = 9, height = 7, dpi = 300)
+
+saveRDS(srat_myeloid_clean, "joanito_myeloid_251119_David_annotated.rds")
+
+##### Extract labels
+myeloid_meta <- srat_myeloid@meta.data
+myeloid_meta$cell.id <- rownames(myeloid_meta)
+myeloid_meta <- myeloid_meta |>
+  dplyr::select(cell.id, David_MCT, David_CT1)
+write.csv(myeloid_meta, "myeloid_full_annotation_to_merge.csv")
+
+#########
+umap_clusters <- DimPlot(srat_myeloid,  group.by = "Bo_SC_cluster", label = TRUE, repel = TRUE, cols = distinctColorPalette(length(unique(srat_myeloid$Bo_SC_cluster))), label.size = 4) + guides(color = guide_legend(ncol = 1))
+ggsave("myeloid_Bo_Grace_annotation.png", plot = umap_clusters, width = 9, height = 7, dpi = 300)
+```
+
+```{r Myeloid - Find Markers}
+# Finding de genes/immune markers 
+markers_immune <- FindAllMarkers(srat_myeloid,
+                                 only.pos = TRUE,
+                                 test.use = "wilcox",
+                                 min.pct = 0.25,
+                                 logfc.threshold = 0.25)
+
+markers_immune <- markers_immune |>
+  filter(p_val_adj < 0.05, avg_log2FC > 1)
+
+write.csv(markers_immune, "markers_myeloid_new_dim20_(just in case).csv")
+
+top_markers_immune <- markers_immune |>
+  group_by(cluster) |>
+  arrange(-avg_log2FC) |>
+  slice_head(n = 10) |>
+  ungroup()
+
+srat_myeloid <- BuildClusterTree(
+  srat_myeloid,
+  assay = "RNA",
+  features = unique(top_markers_immune$gene),
+  dims = NULL,
+  slot = "data",
+  reorder = TRUE,
+  reorder.numeric = FALSE
+)
+
+top_markers_immune$cluster <- factor(top_markers_immune$cluster, levels = levels(Idents(srat_myeloid)))
+top_markers_immune <- top_markers_immune[order(top_markers_immune$cluster),]
+
+srat_myeloid <- ScaleData(srat_myeloid, features=top_markers_immune$gene, split.by= "dataset")
+
+# Downsample equally by patient_id and create the heatmap plot
+cols_lambda0 <- distinctColorPalette(length(unique(srat_myeloid$seurat_clusters)))
+p_heatmap <- DoHeatmap(subset(srat_myeloid, downsample = 400), features = top_markers_immune$gene, group.colors = cols_lambda0) +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0,
+    limit = c(-2, 2),
+    name = "Expression",
+    oob = scales::squish
+  )
+
+ggsave("myeloid_markers_heatmap_new_dim20.png", plot = p_heatmap, width = 50, height = 60, units = "cm", dpi = 300)
+
+###### Post 1st annotation
+# Finding de genes/immune markers 
+markers_immune <- FindAllMarkers(srat_myeloid,
+                                 only.pos = TRUE,
+                                 test.use = "wilcox",
+                                 group.by = "David_CT1",
+                                 min.pct = 0.25,
+                                 logfc.threshold = 0.25)
+
+markers_immune <- markers_immune |>
+  filter(p_val_adj < 0.05, avg_log2FC > 1)
+
+write.csv(markers_immune, "markers_myeloid_new_dim20_CT1.csv")
+```
+
+```{r 2nd annotation}
+##### 2nd Annotation
+srat_myeloid$David_CT1 <- dplyr::case_when(
+  srat_myeloid$seurat_clusters %in% c(0, 8) ~ "Macro TREM2+",
+  srat_myeloid$seurat_clusters %in% c(1, 5) ~ "Monocyte",
+  srat_myeloid$seurat_clusters %in% c(4, 10, 12) ~ "cDC",
+  srat_myeloid$seurat_clusters == 2 ~ "Macro C1QC+",
+  srat_myeloid$seurat_clusters == 6 ~ "Macro SPP1+",
+  srat_myeloid$seurat_clusters == 3 ~ "Macro LYVE1+",
+  srat_myeloid$seurat_clusters == 7 ~ "Neutrophil",
+  srat_myeloid$seurat_clusters == 9 ~ "Cycling Myeloid",
+  srat_myeloid$seurat_clusters == 11 ~ "pDC",
+  TRUE ~ "Other"
+)
+
+umap_clusters <- DimPlot(srat_myeloid,  group.by = "David_CT1", label = TRUE, repel = TRUE, cols = my_colors, label.size = 4)
+ggsave("myeloid_datasets_David_CT1_correct.png", plot = umap_clusters, width = 9, height = 7, dpi = 300)
+
+saveRDS(srat_myeloid, "joanito_myeloid_251121_David_annotated_correct.rds")
+
+##### Extract labels
+myeloid_meta <- srat_myeloid@meta.data
+myeloid_meta$cell.id <- rownames(myeloid_meta)
+myeloid_meta <- myeloid_meta |>
+  dplyr::select(cell.id, David_MCT, David_CT1)
+write.csv(myeloid_meta, "myeloid_full_annotation_to_merge_correct.csv")
+```
+
+```{r Part 2 - Post Merve indications}
+srat <- readRDS("C:/Users/David Lopez/OneDrive - Universitat de Barcelona/PhD/4o Bloque/scRNA-Seq/Joanito et al/joanito_myeloid_251121_David_annotated_correct.rds")
+
+srat <- FindNeighbors(srat, dims=1:25, reduction="harmony")
+srat <- RunUMAP(srat, dims= 1:25, reduction="harmony")
+srat <- FindClusters(srat, res=0.5)
+DimPlot(srat,  group.by = "David_CT1", label = TRUE, cols = distinctColorPalette(length(unique(srat$seurat_clusters))))
+DimPlot(srat,  group.by = "seurat_clusters", label = TRUE, cols = distinctColorPalette(length(unique(srat$seurat_clusters))))
+
+pseudo_myeloid <- AggregateExpression(srat, assays = "RNA", slot = "counts",return.seurat = TRUE, group.by = c("seurat_clusters", "sample.ID", "dataset"))
+pb_meta <- pseudo_myeloid@meta.data
+markers_lr <- FindAllMarkers(
+  object = srat,
+  assay = "RNA",
+  slot = "data",
+  min.pct = 0.25,
+  logfc.threshold = 0.25,
+  only.pos = TRUE
+)
+
+markers_lr <- markers_lr |>
+    dplyr::filter(p_val_adj < 0.05, avg_log2FC > 1)
+
+write.csv(markers_lr, "test_markers_myeloid.csv")
+#########
+markers_immune <- read.csv("myeloid_annotated_FindAllMarkers_LR_filtered.csv")
+
+top_markers_immune <- markers_immune |>
+  group_by(cluster) |>
+  arrange(desc(avg_log2FC)) |>
+  slice_head(n = 10) |>
+  ungroup()
+
+top_markers_immune$cluster <- factor(
+  top_markers_immune$cluster,
+  levels = levels(srat$David_CT1)
+)
+top_markers_immune <- top_markers_immune[order(top_markers_immune$cluster),]
+
+# Build cluster tree based on David_CT1 order
+srat <- BuildClusterTree(
+  srat,
+  assay = "RNA",
+  features = unique(top_markers_immune$gene),
+  slot = "data",
+  reorder = TRUE
+)
+
+# Scale split by dataset
+srat <- ScaleData(srat, features = top_markers_immune$gene, split.by = "dataset")
+
+# Heatmap colors
+cols_lambda0 <- distinctColorPalette(length(unique(srat$David_CT1)))
+
+
+
+
+
+srat <- ScaleData(srat, features=top_markers_immune$gene, split.by= "dataset")
+
+# Downsample equally by patient_id and create the heatmap plot
+cols_lambda0 <- distinctColorPalette(length(unique(srat$David_CT1)))
+meta <- srat@meta.data
+meta$cell.id <- rownames(meta)
+cells_use <- meta |>
+  group_by(David_CT1) |>
+  sample_n(size = min(100, n()), replace = FALSE) |>
+  pull(cell.id)
+
+# Subset the Seurat object to only those cells
+srat_ds <- subset(srat, cells = cells_use)
+
+# Heatmap
+p_heatmap <- DoHeatmap(
+  srat_ds, features = top_markers_immune$gene, group.by = "David_CT1", group.colors = cols_lambda0) +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0,
+    limit = c(-2, 2),
+    name = "Expression",
+    oob = scales::squish
+  )
+
+ggsave("new_myeloid_markers_heatmap_251125.png", plot = p_heatmap, width = 30, height = 40, units = "cm", dpi = 300)
+```
+
+```{r Part 2 - Post Merve indications}
+pb_meta2 <- pb_meta
+
+clusters <- unique(pb_meta2$cluster)
+
+for (cl in clusters) {
+  
+  colname <- paste0("group_", cl)
+  
+  pb_meta2[[colname]] <- ifelse(pb_meta2$cluster == cl, cl, "Other")
+}
+
+
+pb_counts <- pseudo_myeloid@assays$RNA$counts
+results_list <- list()
+
+for (cl in clusters) {
+
+  message("Running DESeq2 on cluster: ", cl)
+  
+  group_col <- paste0("group_", cl)
+  
+  # DESeq2 object
+  dds <- DESeqDataSetFromMatrix(
+    countData = pb_counts,
+    colData   = pb_meta2,
+    design    = as.formula(paste("~ dataset +", group_col))
+  )
+  
+  dds <- DESeq(dds)
+  
+  # Extract contrast
+  res <- results(dds, contrast = c(group_col, cl, "Other"))
+  
+  results_list[[cl]] <- as.data.frame(res)
+}
+```
+
+# TNKILC
+
+```{r TNKILC - Analysis}
+srat_tnk <- readRDS("C:/Users/David Lopez/OneDrive - Universitat de Barcelona/PhD/4o Bloque/scRNA-Seq/Joanito et al/joanito_tnk_251119.rds")
+
+VariableFeatures(srat_tnk) <- split(row.names(srat_tnk@meta.data), srat_tnk@meta.data$dataset) |> lapply(function(cells_use) {
+  srat_tnk[,cells_use] |>
+    FindVariableFeatures(selection.method = "vst", nfeatures = 2000) |> 
+    VariableFeatures()
+}) |> unlist |> unique
+
+srat_tnk <- srat_tnk |> 
+  ScaleData(verbose = FALSE) |> 
+  RunPCA(features = VariableFeatures(srat_tnk), npcs = 50, verbose = FALSE)
+
+srat_tnk <- RunHarmony(srat_tnk, "dataset")
+srat_tnk <- FindNeighbors(srat_tnk, dims=1:30, reduction="harmony") #deafult: dim=20, res=0.5
+srat_tnk <- RunUMAP(srat_tnk, dims= 1:30, reduction="harmony")
+srat_tnk <- FindClusters(srat_tnk, res=0.9)
+
+umap_clusters <- DimPlot(srat_tnk,  group.by = "seurat_clusters", label = TRUE, cols = distinctColorPalette(length(unique(srat_tnk$seurat_clusters))))
+ggsave("tnk_seurat_clusters_dim30_res09.png", plot = umap_clusters, width = 8, height = 7, dpi = 300)
+
+umap_clusters <- DimPlot(srat_tnk,  group.by = "dataset", cols = my_colors2)
+ggsave("tnk_datasets_dim30.png", plot = umap_clusters, width = 8, height = 7, dpi = 300)
+
+saveRDS(srat_tnk_clean, "joanito_tnk_251125_David_annotated.rds")
+
+# tnk markers_immune 
+p <- FeaturePlot(srat_tnk, features = c("CD247", "TRAC", "TRGC1", "IL7R", "CD3E", "LEF1", "CCR7", "PTPRC", "GZMB", "PRF1", "IFNG", "PDCD1", "HAVCR2", "LAG3", "MAF", "CXCR5", "FOXP3", "FCER1G", "TYROBP", "GATA3", "TRDC", "NCAM1", "CD4", "CD8A", "FOXP3", "GZMB", "PRF1", "PCNA", "IL7R"),max.cutoff = "q98", ncol=5) & scale_color_viridis(option = "D") 
+ggsave(filename = "tnk_markers_new_dim30.png", plot = p, width = 20, height = 20, dpi = 300)
+
+########
+
+tnk_cells <- WhichCells(srat_tnk, expression = seurat_clusters %in% c(0:16))
+srat_tnk_clean  <- subset(srat_tnk, cells = tnk_cells)
+
+srat_tnk_clean <- FindNeighbors(srat_tnk_clean, dims=1:30, reduction="harmony") #deafult: dim=20, res=0.5
+srat_tnk_clean <- RunUMAP(srat_tnk_clean, dims= 1:30, reduction="harmony")
+srat_tnk_clean <- FindClusters(srat_tnk_clean, res=0.6)
+
+##### 1st Annotation
+srat_tnk$David_CT1 <- dplyr::case_when(
+  srat_tnk$seurat_clusters %in% c(0, 8) ~ "CD4 central memory-like",
+  srat_tnk$seurat_clusters %in% c(1, 5) ~ "CD8 effector/memory",
+  srat_tnk$seurat_clusters %in% c(2, 3) ~ "Treg",
+  srat_tnk$seurat_clusters == 4 ~ "CD4 T-helper",
+  srat_tnk$seurat_clusters %in% c(6, 18, 22) ~ "CD4 naive",
+  srat_tnk$seurat_clusters %in% c(9, 16) ~ "CD8 effector/exhausted",
+  srat_tnk$seurat_clusters == 10 ~ "CD4 Th17",
+  srat_tnk$seurat_clusters == 11 ~ "CD4 Tfh-like",
+  srat_tnk$seurat_clusters %in% c(7, 12, 17) ~ "CD8 resident memory/gd T cell",
+  srat_tnk$seurat_clusters == 13 ~ "MAIT",
+  srat_tnk$seurat_clusters %in% c(14, 15, 21) ~ "NK-ILC",
+  srat_tnk$seurat_clusters == 19 ~ "Cycling TNKILC",
+  srat_tnk$seurat_clusters %in% c(20, 23, 24, 25, 26) ~ "Contaminant",
+  TRUE ~ "Other"
+)
+
+tnk_cells <- WhichCells(srat_tnk, expression = David_CT1 != "Contaminant")
+srat_tnk_clean  <- subset(srat_tnk, cells = tnk_cells)
+
+umap_clusters <- DimPlot(srat_tnk_clean,  group.by = "David_CT1", label = TRUE, repel = TRUE, raster = FALSE, pt.size = 0.01, cols = my_colors)
+umap_clusters
+ggsave("tnk_David_CT1_251125.png", plot = umap_clusters, width = 11, height = 8, dpi = 300)
+
+saveRDS(srat_tnk_clean, "joanito_tnk_251120_David_annotated.rds")
+distinctColorPalette(length(unique(srat_tnk$David_CT1)))
+##### Extract labels
+tnk_meta <- srat_tnk@meta.data
+tnk_meta$cell.id <- rownames(tnk_meta)
+tnk_meta <- tnk_meta |>
+  dplyr::select(cell.id, David_MCT, David_CT1)
+write.csv(tnk_meta, "tnk_full_annotation_to_merge_correct_261125.csv")
+
+#########
+srat_tnk <- readRDS("joanito_tnk_251120_David_annotated.rds")
+umap_clusters <- DimPlot(srat_tnk,  group.by = "Bo_SC_cluster", label = TRUE, repel = TRUE, cols = distinctColorPalette(length(unique(srat_tnk$Bo_SC_cluster))), label.size = 4) + guides(color = guide_legend(ncol = 1))
+ggsave("tnk_Bo_Grace_annotation.png", plot = umap_clusters, width = 9, height = 7, dpi = 300)
+```
+
+```{r TNKILC - Find Markers}
+# Finding de genes/immune markers 
+markers_immune <- FindAllMarkers(srat_tnk,
+                                 only.pos = TRUE,
+                                 test.use = "wilcox",
+                                 min.pct = 0.25,
+                                 logfc.threshold = 0.25)
+
+markers_immune <- markers_immune |>
+  filter(p_val_adj < 0.05, avg_log2FC > 1)
+
+write.csv(markers_immune, "markers_tnk_new_dim30_res09.csv")
+
+top_markers_immune <- markers_immune |>
+  group_by(cluster) |>
+  arrange(-avg_log2FC) |>
+  slice_head(n = 10) |>
+  ungroup()
+
+srat_tnk <- BuildClusterTree(
+  srat_tnk,
+  assay = "RNA",
+  features = unique(top_markers_immune$gene),
+  dims = NULL,
+  slot = "data",
+  reorder = TRUE,
+  reorder.numeric = FALSE
+)
+
+top_markers_immune$cluster <- factor(top_markers_immune$cluster, levels = levels(Idents(srat_tnk)))
+top_markers_immune <- top_markers_immune[order(top_markers_immune$cluster),]
+
+srat_tnk <- ScaleData(srat_tnk, features=top_markers_immune$gene, split.by= "dataset")
+
+# Downsample equally by patient_id and create the heatmap plot
+cols_lambda0 <- distinctColorPalette(length(unique(srat_tnk$seurat_clusters)))
+p_heatmap <- DoHeatmap(subset(srat_tnk, downsample = 400), features = top_markers_immune$gene, group.colors = cols_lambda0) +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0,
+    limit = c(-2, 2),
+    name = "Expression",
+    oob = scales::squish
+  )
+
+ggsave("tnk_markers_heatmap_new_dim30.png", plot = p_heatmap, width = 50, height = 60, units = "cm", dpi = 300)
+saveRDS(srat_tnk, "joanito_tnk_251119.rds")
+###### Post 1st annotation
+# Finding de genes/immune markers 
+markers_immune <- FindAllMarkers(srat_tnk,
+                                 only.pos = TRUE,
+                                 test.use = "wilcox",
+                                 group.by = "David_CT1",
+                                 min.pct = 0.25,
+                                 logfc.threshold = 0.25)
+
+markers_immune <- markers_immune |>
+  filter(p_val_adj < 0.05, avg_log2FC > 1)
+
+write.csv(markers_immune, "markers_tnk_new_dim20_CT1.csv")
+```
+
+```{r Part 2 - Post Merve indications}
+srat <- readRDS("C:/Users/David Lopez/OneDrive - Universitat de Barcelona/PhD/4o Bloque/scRNA-Seq/Joanito et al/joanito_tnk_251120_David_annotated.rds")
+
+srat <- FindNeighbors(srat, dims=1:25, reduction="harmony")
+srat <- RunUMAP(srat, dims= 1:25, reduction="harmony")
+srat <- FindClusters(srat, res=0.5)
+DimPlot(srat,  group.by = "David_CT1", label = TRUE, cols = distinctColorPalette(length(unique(srat$seurat_clusters))))
+DimPlot(srat,  group.by = "seurat_clusters", label = TRUE, cols = distinctColorPalette(length(unique(srat$seurat_clusters))))
+
+pseudo_myeloid <- AggregateExpression(srat, assays = "RNA", slot = "counts",return.seurat = TRUE, group.by = c("seurat_clusters", "sample.ID", "dataset"))
+pb_meta <- pseudo_myeloid@meta.data
+markers_lr <- FindAllMarkers(
+  object = srat,
+  assay = "RNA",
+  slot = "data",
+  min.pct = 0.25,
+  logfc.threshold = 0.25,
+  only.pos = TRUE
+)
+
+markers_lr <- markers_lr |>
+    dplyr::filter(p_val_adj < 0.05, avg_log2FC > 1)
+
+write.csv(markers_lr, "test_markers_myeloid.csv")
+#########
+markers_immune <- read.csv("tnk_annotation_new_FindAllMarkers_LR_filtered.csv")
+
+top_markers_immune <- markers_immune |>
+  group_by(cluster) |>
+  arrange(desc(avg_log2FC)) |>
+  slice_head(n = 10) |>
+  ungroup()
+
+top_markers_immune$cluster <- factor(
+  top_markers_immune$cluster,
+  levels = levels(srat$David_CT1)
+)
+top_markers_immune <- top_markers_immune[order(top_markers_immune$cluster),]
+
+# Build cluster tree based on David_CT1 order
+srat <- BuildClusterTree(
+  srat_tnk_clean,
+  assay = "RNA",
+  features = unique(top_markers_immune$gene),
+  slot = "data",
+  reorder = TRUE
+)
+
+# Scale split by dataset
+srat <- ScaleData(srat, features = top_markers_immune$gene, split.by = "dataset")
+
+# Heatmap colors
+cols_lambda0 <- distinctColorPalette(length(unique(srat$David_CT1)))
+
+meta <- srat@meta.data
+meta$cell.id <- rownames(meta)
+cells_use <- meta |>
+  group_by(David_CT1) |>
+  sample_n(size = min(500, n()), replace = FALSE) |>
+  pull(cell.id)
+
+# Subset the Seurat object to only those cells
+srat_ds <- subset(srat, cells = cells_use)
+
+# Heatmap
+p_heatmap <- DoHeatmap(
+  srat_ds, features = top_markers_immune$gene, group.by = "David_CT1", group.colors = cols_lambda0) +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0,
+    limit = c(-2, 2),
+    name = "Expression",
+    oob = scales::squish
+  )
+
+ggsave("new_tnk_markers_heatmap_251125.png", plot = p_heatmap, width = 30, height = 40, units = "cm", dpi = 300)
+```
+
+# Stromal
+
+```{r Stromal - Analysis}
+srat_stromal <- readRDS("C:/Users/David Lopez/OneDrive - Universitat de Barcelona/PhD/4o Bloque/scRNA-Seq/Joanito et al/joanito_stromal_251119.rds")
+
+VariableFeatures(srat_stromal) <- split(row.names(srat_stromal@meta.data), srat_stromal@meta.data$dataset) |> lapply(function(cells_use) {
+  srat_stromal[,cells_use] |>
+    FindVariableFeatures(selection.method = "vst", nfeatures = 2000) |> 
+    VariableFeatures()
+}) |> unlist |> unique
+
+srat_stromal <- srat_stromal |> 
+  ScaleData(verbose = FALSE) |> 
+  RunPCA(features = VariableFeatures(srat_stromal), npcs = 50, verbose = FALSE)
+
+srat_stromal <- RunHarmony(srat_stromal, "dataset")
+srat_stromal <- FindNeighbors(srat_stromal, dims=1:30, reduction="harmony")
+srat_stromal <- RunUMAP(srat_stromal, dims= 1:30, reduction="harmony")
+srat_stromal <- FindClusters(srat_stromal, res=0.25)
+
+umap_clusters <- DimPlot(srat_stromal,  group.by = "seurat_clusters", label = TRUE, cols = distinctColorPalette(length(unique(srat_stromal$seurat_clusters))))
+ggsave("stromal_seurat_clusters_dim30_res025.png", plot = umap_clusters, width = 8, height = 7, dpi = 300)
+
+umap_clusters <- DimPlot(srat_stromal,  group.by = "dataset", label = FALSE, cols = my_colors2)
+ggsave("stromal_datasets_dim30.png", plot = umap_clusters, width = 8, height = 7, dpi = 300)
+
+#saveRDS(srat_stromal, "joanito_stromal_251119.rds")
+
+# stromal markers_immune 
+p <- FeaturePlot(srat_stromal, features = c("COL1A1",  "PDGFRA", "PECAM1", "CDH5", "RGS5", "ACTA2", "CCL2", "CCL11", "HLA-DRA", "DCN", "SOX6", "VWF", "CAV1", "PROX1", "S100B", "SOX10"), ncol=4) & scale_color_viridis(option = "D") 
+ggsave(filename = "stromal_markers.png", plot = p, width = 17, height = 18, dpi = 300)
+
+########
+
+stromal_cells <- WhichCells(srat_stromal, expression = seurat_clusters %in% c(0:16))
+srat_stromal_clean  <- subset(srat_stromal, cells = stromal_cells)
+
+srat_stromal_clean <- FindNeighbors(srat_stromal_clean, dims=1:30, reduction="harmony") #deafult: dim=20, res=0.5
+srat_stromal_clean <- RunUMAP(srat_stromal_clean, dims= 1:30, reduction="harmony")
+srat_stromal_clean <- FindClusters(srat_stromal_clean, res=0.6)
+
+##### 1st Annotation
+srat_stromal$David_CT1 <- dplyr::case_when(
+  srat_stromal$seurat_clusters == 0 ~ "myCAF",
+  srat_stromal$seurat_clusters == 1 ~ "Venous Endothelial cell",
+  srat_stromal$seurat_clusters == 2 ~ "Fibro ADAMDEC1",
+  srat_stromal$seurat_clusters == 3 ~ "Fibro stem cell niche",
+  srat_stromal$seurat_clusters == 5 ~ "Fibro KCNN3",
+  srat_stromal$seurat_clusters == 6 ~ "Arterial_Capillary Endothelial cell",
+  srat_stromal$seurat_clusters %in% c(4, 7) ~ "Pericyte",
+  srat_stromal$seurat_clusters == 8 ~ "CXCL14+ CAF",
+  srat_stromal$seurat_clusters == 9 ~ "Fibro BMP-producing ",
+  srat_stromal$seurat_clusters == 11 ~ "Smooth Muscle",
+  srat_stromal$seurat_clusters == 12 ~ "Lymphatic Endothelial cell",
+  srat_stromal$seurat_clusters == 13 ~ "Myofibroblast",
+  srat_stromal$seurat_clusters == 10 ~ "Contaminant",
+  TRUE ~ "Other"
+)
+
+stromal_cells <- WhichCells(srat_stromal, expression = David_CT1 != "Contaminant")
+srat_stromal_clean  <- subset(srat_stromal, cells = stromal_cells)
+
+umap_clusters <- DimPlot(srat_stromal_clean,  group.by = "David_CT1", label = TRUE, repel = TRUE, raster = FALSE, pt.size = 0.01, cols = my_colors)
+umap_clusters
+ggsave("stromal_David_CT1.png", plot = umap_clusters, width = 11, height = 8, dpi = 300)
+
+srat_stromal_clean <- FindNeighbors(srat_stromal_clean, dims=1:30, reduction="harmony")
+srat_stromal_clean <- RunUMAP(srat_stromal_clean, dims= 1:30, reduction="harmony")
+umap_clusters <- DimPlot(srat_stromal_clean,  group.by = "David_CT1", label = TRUE, repel = TRUE, raster = FALSE, pt.size = 0.01, cols = my_colors)
+ggsave("stromal_David_CT1_clean.png", plot = umap_clusters, width = 10, height = 8, dpi = 300)
+
+saveRDS(srat_stromal_clean, "joanito_stromal_251120_David_annotated.rds")
+
+##### Extract labels
+stromal_meta <- srat_stromal@meta.data
+stromal_meta$cell.id <- rownames(stromal_meta)
+stromal_meta <- stromal_meta |>
+  dplyr::select(cell.id, David_MCT, David_CT1)
+write.csv(stromal_meta, "stromal_full_annotation_to_merge.csv")
+
+#########
+srat_stromal <- readRDS("joanito_stromal_251120_David_annotated.rds")
+umap_clusters <- DimPlot(srat_stromal,  group.by = "Bo_SC_cluster", label = TRUE, repel = TRUE, cols = distinctColorPalette(length(unique(srat_stromal$Bo_SC_cluster))), label.size = 4) + guides(color = guide_legend(ncol = 1))
+ggsave("stromal_Bo_Grace_annotation.png", plot = umap_clusters, width = 9, height = 7, dpi = 300)
+```
+
+```{r Stromal - Find Markers}
+# Finding de genes/immune markers 
+markers_stromal <- FindAllMarkers(srat_stromal,
+                                 only.pos = TRUE,
+                                 test.use = "wilcox",
+                                 min.pct = 0.25,
+                                 logfc.threshold = 0.25)
+
+markers_stromal <- markers_stromal |>
+  filter(p_val_adj < 0.05, avg_log2FC > 1)
+
+write.csv(markers_stromal, "markers_stromal_new_dim30_res025.csv")
+
+top_markers_stromal <- markers_stromal |>
+  group_by(cluster) |>
+  arrange(-avg_log2FC) |>
+  slice_head(n = 10) |>
+  ungroup()
+
+srat_stromal <- BuildClusterTree(
+  srat_stromal,
+  assay = "RNA",
+  features = unique(top_markers_stromal$gene),
+  dims = NULL,
+  slot = "data",
+  reorder = TRUE,
+  reorder.numeric = FALSE
+)
+
+top_markers_stromal$cluster <- factor(top_markers_stromal$cluster, levels = levels(Idents(srat_stromal)))
+top_markers_stromal <- top_markers_stromal[order(top_markers_stromal$cluster),]
+
+srat_stromal <- ScaleData(srat_stromal, features=top_markers_stromal$gene, split.by= "dataset")
+
+# Downsample equally by patient_id and create the heatmap plot
+cols_lambda0 <- distinctColorPalette(length(unique(srat_stromal$seurat_clusters)))
+p_heatmap <- DoHeatmap(subset(srat_stromal, downsample = 400), features = top_markers_stromal$gene, group.colors = cols_lambda0) +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0,
+    limit = c(-2, 2),
+    name = "Expression",
+    oob = scales::squish
+  )
+
+# Save the plot using ggsave with high resolution and proper dimensions
+ggsave("stromal_markers_heatmap_new_dim30.png", plot = p_heatmap, width = 50, height = 60, units = "cm", dpi = 300)
+saveRDS(srat_stromal, "joanito_stromal_251119.rds")
+###### Post 1st annotation
+# Finding de genes/stromal markers 
+markers_stromal <- FindAllMarkers(srat_stromal,
+                                 only.pos = TRUE,
+                                 test.use = "wilcox",
+                                 group.by = "David_CT1",
+                                 min.pct = 0.25,
+                                 logfc.threshold = 0.25)
+
+markers_stromal <- markers_stromal |>
+  filter(p_val_adj < 0.05, avg_log2FC > 1)
+
+write.csv(markers_stromal, "markers_stromal_new_dim20_CT1.csv")
+```
+
+```{r}
+srat_stromal <- readRDS("joanito_stromal_251120_David_annotated.rds")
+DimPlot(srat_stromal,  group.by = "seurat_clusters", label = TRUE, cols = distinctColorPalette(length(unique(srat_stromal$seurat_clusters))))
+
+p <- FeaturePlot(srat_stromal, features = c("COL1A1",  "PDGFRA", "PECAM1", "CDH5", "RGS5", "ACTA2", "CCL2", "CCL11", "HLA-DRA", "DCN", "SOX6", "VWF", "CAV1", "PROX1", "MYH11", "CXCL14", "FAP", "KCNN3", "ADAMDEC1", "POSTN"), ncol=5) & scale_color_viridis(option = "D") 
+ggsave(filename = "stromal_markers_new_251125.png", plot = p, width = 21, height = 18, dpi = 300)
+
+#########
+markers_immune <- read.csv("stromal_annotated_FindAllMarkers_LR_filtered.csv")
+
+top_markers_immune <- markers_immune |>
+  group_by(cluster) |>
+  arrange(desc(avg_log2FC)) |>
+  slice_head(n = 10) |>
+  ungroup()
+
+top_markers_immune$cluster <- factor(
+  top_markers_immune$cluster,
+  levels = levels(srat$David_CT1)
+)
+top_markers_immune <- top_markers_immune[order(top_markers_immune$cluster),]
+
+# Build cluster tree based on David_CT1 order
+srat <- BuildClusterTree(
+  srat_stromal,
+  assay = "RNA",
+  features = unique(top_markers_immune$gene),
+  slot = "data",
+  reorder = TRUE
+)
+
+# Scale split by dataset
+srat <- ScaleData(srat, features = top_markers_immune$gene, split.by = "dataset")
+
+# Heatmap colors
+cols_lambda0 <- distinctColorPalette(length(unique(srat$David_CT1)))
+
+meta <- srat@meta.data
+meta$cell.id <- rownames(meta)
+cells_use <- meta |>
+  group_by(David_CT1) |>
+  sample_n(size = min(500, n()), replace = FALSE) |>
+  pull(cell.id)
+
+# Subset the Seurat object to only those cells
+srat_ds <- subset(srat, cells = cells_use)
+
+# Heatmap
+p_heatmap <- DoHeatmap(
+  srat_ds, features = top_markers_immune$gene, group.by = "David_CT1", group.colors = cols_lambda0) +
+  scale_fill_gradient2(
+    low = "blue",
+    mid = "white",
+    high = "red",
+    midpoint = 0,
+    limit = c(-2, 2),
+    name = "Expression",
+    oob = scales::squish
+  )
+
+ggsave("new_stromal_markers_heatmap_251125.png", plot = p_heatmap, width = 30, height = 40, units = "cm", dpi = 300)
+```
+
+# Epithelial
+
+```{r Epithelial - Analysis}
+srat_epi <- readRDS("C:/Users/David Lopez/OneDrive - Universitat de Barcelona/PhD/4o Bloque/scRNA-Seq/Joanito et al/joanito_epithelial_251119.rds")
+
+VariableFeatures(srat_epi) <- split(row.names(srat_epi@meta.data), srat_epi@meta.data$dataset) |> lapply(function(cells_use) {
+  srat_epi[,cells_use] |>
+    FindVariableFeatures(selection.method = "vst", nfeatures = 2000) |> 
+    VariableFeatures()
+}) |> unlist |> unique
+
+srat_epi <- srat_epi |> 
+  ScaleData(verbose = FALSE) |> 
+  RunPCA(features = VariableFeatures(srat_epi), npcs = 50, verbose = FALSE)
+
+srat_epi <- RunHarmony(srat_epi, "dataset")
+srat_epi <- FindNeighbors(srat_epi, dims=1:10, reduction="harmony")
+srat_epi <- RunUMAP(srat_epi, dims= 1:10, reduction="harmony")
+srat_epi <- FindClusters(srat_epi, res=0.1)
+
+umap_clusters <- DimPlot(srat_epi,  group.by = "dataset", label = FALSE, cols = my_colors2) 
+ggsave("epi_datasets.png", plot = umap_clusters, width = 8, height = 7, dpi = 300)
+
+umap_clusters <- DimPlot(srat_epi,  group.by = "Bo_patient_msi", label = FALSE, cols = my_colors2) 
+ggsave("epi_msi.png", plot = umap_clusters, width = 8, height = 7, dpi = 300)
+
+umap_clusters <- DimPlot(srat_epi,  group.by = "patient.ID", label = FALSE, cols = distinctColorPalette(length(unique(srat_epi$patient.ID)))) + NoLegend()
+ggsave("epi_patients.png", plot = umap_clusters, width = 9, height = 7, dpi = 300)
+
+#saveRDS(srat_epi, "joanito_epi_251119.rds")
+
+# epi markers_immune 
+p <- FeaturePlot(srat_epi, features = c("EPCAM", "KRT20", "KRT8", "CEACAM5", "TFF3", "LGR5", "OLFM4", "ACL2", "MKI67", "VIM", "ZEB1", "TWIST", "MMP7", "MUC2", "SPDEF", "CHGA"), ncol=4) & scale_color_viridis(option = "D") 
+ggsave(filename = "epithelial_markers.png", plot = p, width = 17, height = 18, dpi = 300)
+
+###
+epi_meta <- srat_epi@meta.data
+epi_meta$cell.id <- rownames(epi_meta)
+epi_meta <- epi_meta |>
+  dplyr::select(cell.id, David_MCT)
+write.csv(epi_meta, "epi_full_annotation_to_merge.csv")
+
+
+saveRDS(srat_epi, "joanito_epithelial_251119.rds")
+```
+
+# Full Object Annotate
+
+```{r Annotation}
+myeloid_meta <- read.csv("myeloid_full_annotation_to_merge_correct.csv")
+tnkilc_meta <- read.csv("tnk_full_annotation_to_merge_correct_261125.csv")
+stromal_meta <- read.csv("stromal_full_annotation_to_merge.csv")
+epi_meta <- read.csv("epi_full_annotation_to_merge.csv")
+epi_meta$David_CT1 <- epi_meta$David_MCT
+other_meta <- read.csv("rest_cell_full_annotation_to_merge.csv")
+other_meta$David_CT1 <- other_meta$David_MCT
+
+full_meta <- bind_rows(myeloid_meta, tnkilc_meta, stromal_meta, epi_meta, other_meta)
+full_meta$X <- NULL
+full_meta$David_MCT <- NULL
+
+srat@meta.data$cell.id <- rownames(srat@meta.data)
+idx <- match(rownames(srat@meta.data), full_meta$cell.id)
+srat@meta.data$David_CT1 <- full_meta$David_CT1[idx]
+srat@meta.data$cell.id <- NULL
+colnames(srat@meta.data)[colnames(srat@meta.data) == "David_CT1"] <- "David_cell_type"
+
+keep_cells <- WhichCells(srat, expression = David_cell_type != "Contaminant")
+srat_clean  <- subset(srat, cells = keep_cells)
+srat_clean$David_cell_type <- trimws(srat_clean$David_cell_type)
+
+# Top annotation
+top_map <- c(
+  "PlasmaB" = "PlasmaB",
+  "myCAF" = "CAF",
+  "Pericyte" = "Pericyte",
+  "Macro C1QC" = "Macrophage",
+  "Macro TREM2+" = "Macrophage",
+  "CD8 resident memory/gd T cell" = "CD8",
+  "CD8 effector/memory" = "CD8",
+  "CD4 central memory-like" = "CD4",
+  "NK-ILC" = "NK-ILC",
+  "B" = "B",
+  "CD4 naive" = "CD4",
+  "Fibro ADAMDEC1" = "Fibroblast",
+  "Cycling Myeloid" = "Cycling cell",
+  "Arterial_Capillary Endothelial cell" = "Endothelial",
+  "Mast" = "Mast",
+  "Entericglial" = "Entericglial",
+  "Cycling TNKILC" = "Cycling cell",
+  "Fibro KCNN3" = "Fibroblast",
+  "Myofibroblast" = "Fibroblast",
+  "CD4 T-helper" = "T helper",
+  "Epithelial" = "Epithelial",
+  "Treg" = "Treg",
+  "cDC" = "DC",
+  "Venous Endothelial cell" = "Endothelial",
+  "CD4 Th17" = "T helper",
+  "Macro LYVE1+" = "Macrophage",
+  "Fibro BMP-producing" = "Fibroblast",
+  "CXCL14+ CAF" = "CAF",
+  "CD4 Tfh-like" = "T helper",
+  "Monocyte" = "Monocyte",
+  "MAIT" = "MAIT",
+  "Neutrophil" = "Neutrophil",
+  "Macro SPP1+" = "Macrophage",
+  "CD8 effector/exhausted" = "CD8",
+  "pDC" = "DC",
+  "Smooth Muscle" = "Smooth Muscle",
+  "Lymphatic Endothelial cell" = "Endothelial",
+  "Fibro stem cell niche" = "Fibroblast"
+)
+
+# Crear nueva columna usando el mapeo
+srat_clean@meta.data$David_top_CT <- top_map[srat_clean@meta.data$David_cell_type]
+
+# Mid annotation
+mid_map <- c(
+  "PlasmaB" = "PlasmaB",
+  "myCAF" = "myCAF",
+  "Pericyte" = "Pericyte",
+  "Macro C1QC" = "Macrophage C1QC_TREM2",
+  "Macro TREM2+" = "Macrophage C1QC_TREM2",
+  "CD8 resident memory/gd T cell" = "CD8 resident memory-gd T cell",
+  "CD8 effector/memory" = "CD8 effector-memory",
+  "CD4 central memory-like" = "CD4 central memory-like",
+  "NK-ILC" = "NK-ILC",
+  "B" = "B",
+  "CD4 naive" = "CD4 naive",
+  "Fibro ADAMDEC1" = "Fibroblast ADAMDEC1",
+  "Cycling Myeloid" = "Cycling Myeloid",
+  "Arterial_Capillary Endothelial cell" = "Endothelial",
+  "CD8 resident memory/gd T cell" = "CD8 rm - gd T cell",
+  "Mast" = "Mast",
+  "Entericglial" = "Entericglial",
+  "Cycling TNKILC" = "Cycling TNKILC",
+  "Fibro KCNN3" = "Fibroblast KCNN3",
+  "Myofibroblast" = "Myofibroblast",
+  "CD4 T-helper" = "CD4 T-helper",
+  "Epithelial" = "Epithelial",
+  "Treg" = "Treg",
+  "cDC" = "cDC",
+  "Venous Endothelial cell" = "Endothelial",
+  "CD4 Th17" = "CD4 Th17",
+  "Macro LYVE1+" = "Macrophage LYVE1",
+  "Fibro BMP-producing" = "Fibroblast BMP-producing",
+  "CXCL14+ CAF" = "CAF CXCL14+",
+  "CD4 Tfh-like" = "CD4 Tfh-like",
+  "Monocyte" = "Monocyte",
+  "MAIT" = "MAIT",
+  "Neutrophil" = "Neutrophil",
+  "Macro SPP1+" = "Macrophage SPP1",
+  "CD8 effector/exhausted" = "CD8 effector-exhausted",
+  "pDC" = "pDC",
+  "Smooth Muscle" = "Smooth Muscle",
+  "Lymphatic Endothelial cell" = "Endothelial",
+  "Fibro stem cell niche" = "Fibroblast stem cell niche"
+)
+
+# Crear nueva columna usando el mapeo
+srat_clean@meta.data$David_mid_CT <- mid_map[srat_clean@meta.data$David_cell_type]
+
+# Mid annotation
+bot_map <- c(
+  "PlasmaB" = "PlasmaB",
+  "myCAF" = "myCAF",
+  "Pericyte" = "Pericyte",
+  "Macro C1QC" = "Macro C1QC",
+  "Macro TREM2+" = "Macrophage TREM2",
+  "CD8 resident memory/gd T cell" = "CD8 resident memory-gd T cell",
+  "CD8 effector/memory" = "CD8 effector-memory",
+  "CD4 central memory-like" = "CD4 central memory-like",
+  "NK-ILC" = "NK-ILC",
+  "B" = "B",
+  "CD4 naive" = "CD4 naive",
+  "Fibro ADAMDEC1" = "Fibroblast ADAMDEC1",
+  "Cycling Myeloid" = "Cycling Myeloid",
+  "Arterial_Capillary Endothelial cell" = "Arterial-Capillary Endothelial cell",
+  "CD8 resident memory/gd T cell" = "CD8 rm - gd T cell",
+  "Mast" = "Mast",
+  "Entericglial" = "Entericglial",
+  "Cycling TNKILC" = "Cycling TNKILC",
+  "Fibro KCNN3" = "Fibroblast KCNN3",
+  "Myofibroblast" = "Myofibroblast",
+  "CD4 T-helper" = "CD4 T-helper",
+  "Epithelial" = "Epithelial",
+  "Treg" = "Treg",
+  "cDC" = "cDC",
+  "Venous Endothelial cell" = "Venous Endothelial cell",
+  "CD4 Th17" = "CD4 Th17",
+  "Macro LYVE1+" = "Macrophage LYVE1",
+  "Fibro BMP-producing" = "Fibroblast BMP-producing",
+  "CXCL14+ CAF" = "CAF CXCL14",
+  "CD4 Tfh-like" = "CD4 Tfh-like",
+  "Monocyte" = "Monocyte",
+  "MAIT" = "MAIT",
+  "Neutrophil" = "Neutrophil",
+  "Macro SPP1+" = "Macrophage SPP1",
+  "CD8 effector/exhausted" = "CD8 effector-exhausted",
+  "pDC" = "pDC",
+  "Smooth Muscle" = "Smooth Muscle",
+  "Lymphatic Endothelial cell" = "Lymphatic Endothelial cell",
+  "Fibro stem cell niche" = "Fibroblast stem cell niche"
+)
+
+# Crear nueva columna usando el mapeo
+srat_clean@meta.data$David_specific_CT <- bot_map[srat_clean@meta.data$David_cell_type]
+
+#New column classification
+srat_clean$status <- case_when(
+  srat_clean$Bo_patient_iCMS_purity == "Normal" & srat_clean$Bo_patient_msi == "Normal" ~ "Normal",
+  srat_clean$Bo_patient_iCMS_purity == "iCMS3"  & srat_clean$Bo_patient_msi == "MSS"    ~ "MSS-i3",
+  srat_clean$Bo_patient_iCMS_purity == "iCMS2"  & srat_clean$Bo_patient_msi == "MSS"    ~ "MSS-i2",
+  srat_clean$Bo_patient_msi == "MSI-H"                                                  ~ "MSI-H",
+  TRUE ~ "Indeterminate"
+)
+
+##############################
+mct_map <- c(
+  "PlasmaB" = "PlasmaB",
+  "myCAF" = "Fibroblast",
+  "Pericyte" = "Fibroblast",
+  "Macro C1QC" = "Myeloid",
+  "Macro TREM2+" = "Myeloid",
+  "CD8 resident memory/gd T cell" = "TNKILC",
+  "CD8 effector/memory" = "TNKILC",
+  "CD4 central memory-like" = "TNKILC",
+  "NK-ILC" = "TNKILC",
+  "B" = "B",
+  "CD4 naive" = "TNKILC",
+  "Fibro ADAMDEC1" = "Fibroblast",
+  "Cycling Myeloid" = "Myeloid",
+  "Arterial_Capillary Endothelial cell" = "Endothelial",
+  "CD8 resident memory/gd T cell" = "TNKILC",
+  "Mast" = "Mast",
+  "Entericglial" = "Entericglial",
+  "Cycling TNKILC" = "TNKILC",
+  "Fibro KCNN3" = "Fibroblast",
+  "Myofibroblast" = "Fibroblast",
+  "CD4 T-helper" = "TNKILC",
+  "Epithelial" = "Epithelial",
+  "Treg" = "TNKILC",
+  "cDC" = "Myeloid",
+  "Venous Endothelial cell" = "Endothelial",
+  "CD4 Th17" = "TNKILC",
+  "Macro LYVE1+" = "Myeloid",
+  "Fibro BMP-producing" = "Fibroblast",
+  "CXCL14+ CAF" = "Fibroblast",
+  "CD4 Tfh-like" = "TNKILC",
+  "Monocyte" = "Myeloid",
+  "MAIT" = "TNKILC",
+  "Neutrophil" = "Neutrophil",
+  "Macro SPP1+" = "Myeloid",
+  "CD8 effector/exhausted" = "TNKILC",
+  "pDC" = "pDC",
+  "Smooth Muscle" = "Fibroblast",
+  "Lymphatic Endothelial cell" = "Endothelial",
+  "Fibro stem cell niche" = "Fibroblast"
+)
+
+# New column using mapping
+srat_clean@meta.data$David_MCT <- mct_map[srat_clean@meta.data$David_cell_type]
+#####################
+
+# Save Final Object
+saveRDS(srat_clean, "joanito_full_object_251127_David_annotated_corrected.rds")
+```
+
+```{r Plots}
+## UMAP
+cols1 = distinctColorPalette(length(unique(srat_clean$David_specific_CT)))
+
+umap_clusters <- DimPlot(srat_clean,  group.by = "David_specific_CT", label = TRUE, repel = TRUE,  cols = cols1) + guides(color = guide_legend(ncol = 1))
+ggsave("full_object_detailed_annotated_251127.png", plot = umap_clusters, width = 15, height = 12, dpi = 300)
+
+umap_clusters <- DimPlot(srat_clean,  group.by = "David_specific_CT", label = TRUE, repel = TRUE, raster = FALSE, cols = cols1) + guides(color = guide_legend(ncol = 1))
+ggsave("full_object_detailed_annotated_251127_raster.png", plot = umap_clusters, width = 15, height = 12, dpi = 300)
+
+cols2 = distinctColorPalette(length(unique(srat_clean$David_mid_CT)))
+
+umap_clusters <- DimPlot(srat_clean,  group.by = "David_top_CT", label = TRUE, repel = TRUE,  cols = cols2) + guides(color = guide_legend(ncol = 1))
+ggsave("full_object_top_annotated_251127.png", plot = umap_clusters, width = 13, height = 10, dpi = 300)
+
+umap_clusters <- DimPlot(srat_clean,  group.by = "David_top_CT", label = TRUE, repel = TRUE, raster = FALSE, cols = cols2) + guides(color = guide_legend(ncol = 1))
+ggsave("full_object_top_annotated_251127_raster.png", plot = umap_clusters, width = 13, height = 10, dpi = 300)
+
+umap_clusters <- DimPlot(srat_clean,  group.by = "David_mid_CT", label = TRUE, repel = TRUE,  cols = cols2) + guides(color = guide_legend(ncol = 1))
+ggsave("full_object_middle_annotated_251127.png", plot = umap_clusters, width = 13, height = 10, dpi = 300)
+
+umap_clusters <- DimPlot(srat_clean,  group.by = "David_mid_CT", label = TRUE, repel = TRUE, raster = FALSE, cols = cols2) + guides(color = guide_legend(ncol = 1))
+ggsave("full_object_middle_annotated_251127_raster.png", plot = umap_clusters, width = 13, height = 10, dpi = 300)
+
+umap_clusters <- DimPlot(srat_clean,  group.by = "Bo_sample_origin", label = FALSE, raster = FALSE, cols = my_colors2)
+ggsave("joanito_sample_origin.png", plot = umap_clusters, width = 8, height = 7, dpi = 300)
+
+umap_clusters <- DimPlot(srat_clean,  group.by = "dataset", label = FALSE, raster = FALSE, cols = my_colors2)
+ggsave("joanito_dataset.png", plot = umap_clusters, width = 8, height = 7, dpi = 300)
+
+umap_clusters <- DimPlot(srat_clean,  group.by = "Bo_patient_msi", label = FALSE, raster = FALSE, cols = my_colors2)
+ggsave("joanito_msi_status.png", plot = umap_clusters, width = 8, height = 7, dpi = 300)
+
+umap_clusters <- DimPlot(srat_clean,  group.by = "status", label = FALSE, raster = FALSE, cols = my_colors2)
+ggsave("joanito_final_status.png", plot = umap_clusters, width = 8, height = 7, dpi = 300)
+```
+
+# Check patient number per MSI Status
+
+```{r}
+srat_meta <- srat_clean@meta.data
+
+table_detailed_annotation <- srat_meta |>
+  group_by(patient.ID, David_specific_CT, status) |>
+  summarise(n_cells = n(), .groups = "drop") |>
+  mutate(pass_15 = n_cells > 15) |>
+  group_by(David_specific_CT, status) |>
+  summarise(n_patients = sum(pass_15), .groups = "drop") |>
+  filter(status %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+print(table_detailed_annotation)
+
+table_middle_annotation <- srat_meta |>
+  group_by(patient.ID, David_mid_CT, status) |>
+  summarise(n_cells = n(), .groups = "drop") |>
+  mutate(pass_15 = n_cells > 15) |>
+  group_by(David_mid_CT, status) |>
+  summarise(n_patients = sum(pass_15), .groups = "drop") |>
+  filter(status %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+print(table_middle_annotation)
+
+table_top_annotation <- srat_meta |> 
+  group_by(patient.ID, David_top_CT, status) |> 
+  summarise(n_cells = n(), .groups = "drop") |> 
+  filter(n_cells > 15) |> 
+  group_by(David_top_CT, status) |> 
+  summarise(n_patients = n(), .groups = "drop") |>
+  filter(status %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+print(table_top_annotation)
+```
+
+```{r % Plots per MSI-iCMS Status (All cell types)}
+df_pct <- srat_meta |>
+  group_by(status, David_specific_CT) |>
+  summarise(n = n(), .groups = "drop_last") |>
+  mutate(percent = 100 * n / sum(n)) |>
+  ungroup() |>
+  filter(status %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+
+pct_MCT <- ggplot(df_pct, aes(x = status, y = percent, fill = David_specific_CT)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = cols1) +
+  labs(
+    x = "Patient (MSI-iCMS status)",
+    y = "Proportion",
+    fill = "Cell Types"
+  ) +
+  theme_bw()
+ggsave("percent_MSI-iCMS_status.png", plot = pct_MCT, width = 10, height = 6, dpi = 300)
+
+########
+
+df_pct <- srat_meta |>
+  group_by(status, David_top_CT) |>
+  summarise(n = n(), .groups = "drop_last") |>
+  mutate(percent = 100 * n / sum(n)) |>
+  ungroup() |>
+  filter(status %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+
+pct_top_CT <- ggplot(df_pct, aes(x = status, y = percent, fill = David_top_CT)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = cols2) +
+  labs(
+    x = "Patient (MSI-iCMS status)",
+    y = "Proportion",
+    fill = "Top Cell Types"
+  ) +
+  theme_bw() + guides(fill = guide_legend(ncol = 1))
+ggsave("percent_MSI-iCMS_top_CT.png", plot = pct_top_CT, width = 7, height = 6, dpi = 300)
+
+########
+
+df_pct <- srat_meta |>
+  group_by(status, David_MCT) |>
+  summarise(n = n(), .groups = "drop_last") |>
+  mutate(percent = 100 * n / sum(n)) |>
+  ungroup() |>
+  filter(status %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+
+pct_top_CT <- ggplot(df_pct, aes(x = status, y = percent, fill = David_MCT)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = my_colors) +
+  labs(
+    x = "Patient (MSI-iCMS status)",
+    y = "Proportion",
+    fill = "Mayor Cell Types"
+  ) +
+  theme_bw() + guides(fill = guide_legend(ncol = 1))
+ggsave("percent_MSI-iCMS_MCT.png", plot = pct_top_CT, width = 7, height = 6, dpi = 300)
+```
+
+```{r % Plots per MSI-iCSM Status (TKNILC, Myeloid, Stromal)}
+# TNKILC
+srat_meta_tnkilc <- srat_meta |>
+  filter(David_MCT == "TNKILC")
+
+df_pct_tnkilc <- srat_meta_tnkilc |>
+  group_by(status, David_mid_CT) |>
+  summarise(n = n(), .groups = "drop_last") |>
+  mutate(percent = 100 * n / sum(n)) |>
+  ungroup() |>
+  filter(status %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+
+cols3 = distinctColorPalette(length(unique(srat_meta_tnkilc$David_mid_CT)))
+
+pct_tnkilc_mid <- ggplot(df_pct_tnkilc, aes(x = status, y = percent, fill = David_mid_CT)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = my_colors) +
+  labs(
+    x = "Patient (MSI-iCMS status)",
+    y = "Proportion",
+    fill = "Cell Type"
+  ) +
+  theme_bw()
+pct_tnkilc_mid
+ggsave("percent_TNKILC_MSI_status_mid_annotation.png", plot = pct_tnkilc_mid, width = 7, height = 6, dpi = 300)
+
+# Myeloid
+srat_meta_myeloid <- srat_meta |>
+  filter(David_MCT %in% c("Myeloid", "Neutrophil", "pDC"))
+
+df_pct_myeloid <- srat_meta_myeloid |>
+  group_by(status, David_mid_CT) |>
+  summarise(n = n(), .groups = "drop_last") |>
+  mutate(percent = 100 * n / sum(n)) |>
+  ungroup() |>
+  filter(status %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+
+pct_myeloid_mid <- ggplot(df_pct_myeloid, aes(x = status, y = percent, fill = David_mid_CT)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = my_colors) +
+  labs(
+    x = "Patient (MSI-iCMS status)",
+    y = "Proportion",
+    fill = "Cell Type"
+  ) +
+  theme_bw()
+pct_myeloid_mid
+ggsave("percent_myeloid_MSI_status_mid_annotation.png", plot = pct_myeloid_mid, width = 7, height = 6, dpi = 300)
+
+# Fibroblasts
+srat_meta_fibroblast <- srat_meta |>
+  filter(David_MCT == "Fibroblast")
+
+df_pct_fibroblast <- srat_meta_fibroblast |>
+  group_by(status, David_mid_CT) |>
+  summarise(n = n(), .groups = "drop_last") |>
+  mutate(percent = 100 * n / sum(n)) |>
+  ungroup() |>
+  filter(status %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+
+pct_fibroblast_mid <- ggplot(df_pct_fibroblast, aes(x = status, y = percent, fill = David_mid_CT)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = my_colors) +
+  labs(
+    x = "Patient (MSI-iCMS status)",
+    y = "Proportion",
+    fill = "Cell Type"
+  ) +
+  theme_bw()
+pct_fibroblast_mid
+ggsave("percent_fibroblast_MSI_status_mid_annotation.png", plot = pct_fibroblast_mid, width = 7, height = 6, dpi = 300)
+```
+
+```{r Boxplot per MSI-iCMS Status (TKNILC, Myeloid, Stromal)}
+# Count cells per patient × cluster
+df_counts <- srat_meta_tnkilc |>
+  group_by(patient.ID, David_mid_CT) |>
+  summarise(n = n(), .groups = "drop")
+
+# Total cells per patient
+df_totals <- srat_meta_tnkilc |>
+  group_by(patient.ID) |>
+  summarise(total = n(), .groups = "drop")
+
+# Combine + compute percentages
+df_pct <- df_counts |>
+  left_join(df_totals, by = "patient.ID") |>
+  mutate(pct = 100 * n / total)
+
+patient_condition <- srat_meta_tnkilc |>
+  group_by(patient.ID) |>
+  summarise(condition = unique(status), .groups = "drop")
+
+df_pct <- df_pct |>
+  left_join(patient_condition, by = "patient.ID")
+
+df_msi <- df_pct |> 
+  dplyr::filter(condition %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+
+get_pw <- function(pw_mat, g1, g2) {
+  if (is.null(pw_mat)) return(NA_real_)
+  
+  # Matrix
+  if (is.matrix(pw_mat)) {
+    if (g1 %in% rownames(pw_mat) && g2 %in% colnames(pw_mat)) {
+      return(pw_mat[g1, g2])
+    }
+    if (g2 %in% rownames(pw_mat) && g1 %in% colnames(pw_mat)) {
+      return(pw_mat[g2, g1])
+    }
+  }
+  
+  # Named vector (only two conditions existed)
+  if (is.numeric(pw_mat) && !is.null(names(pw_mat))) {
+    nm <- names(pw_mat)
+    pair1 <- paste0(g1, "-", g2)
+    pair2 <- paste0(g2, "-", g1)
+    if (pair1 %in% nm) return(pw_mat[pair1])
+    if (pair2 %in% nm) return(pw_mat[pair2])
+  }
+  
+  return(NA_real_)
+}
+
+# Main KW + pairwise function
+kw_results <- df_msi |>
+  group_by(David_mid_CT) |>
+  summarise(
+    # Keep data for this CT
+    data_ct = list(cur_data()),
+    
+    # Kruskal-Wallis global p-value
+    p_kw = kruskal.test(pct ~ condition, data = cur_data())$p.value,
+    
+    # Pairwise Wilcoxon tests (may return matrix or named vector)
+    pw = list(
+      pairwise.wilcox.test(
+        x = cur_data()$pct,
+        g = cur_data()$condition,
+        exact = FALSE,
+        p.adjust.method = "BH"
+      )$p.value
+    ),
+    
+    # Medians
+    median_MSIH  = median(pct[condition == "MSI-H"]),
+    median_MSSi2 = median(pct[condition == "MSS-i2"]),
+    median_MSSi3 = median(pct[condition == "MSS-i3"]),
+    
+    .groups = "drop"
+  ) |>
+  # Extract pairwise p-values
+  rowwise() |>
+  mutate(
+    p_MSIH_vs_MSSi2  = get_pw(pw, "MSI-H", "MSS-i2"),
+    p_MSIH_vs_MSSi3  = get_pw(pw, "MSI-H", "MSS-i3"),
+    p_MSSi2_vs_MSSi3 = get_pw(pw, "MSS-i2", "MSS-i3")
+  ) |>
+  ungroup() |>
+  mutate(
+    FDR_KW = p.adjust(p_kw, method = "BH")
+  ) |>
+  select(
+    David_mid_CT,
+    p_kw, FDR_KW,
+    median_MSIH, median_MSSi2, median_MSSi3,
+    p_MSIH_vs_MSSi2, p_MSIH_vs_MSSi3, p_MSSi2_vs_MSSi3
+  )
+
+my_comparisons <- list(
+  c("MSI-H", "MSS-i2"),
+  c("MSI-H", "MSS-i3"),
+  c("MSS-i2", "MSS-i3")
+)
+
+boxplot <- ggboxplot(
+  df_msi,
+  x = "condition",
+  y = "pct",
+  fill = "condition",
+  facet.by = "David_mid_CT",
+  scales = "free_y"
+) +
+  scale_fill_manual(
+    values = c("MSI-H"  = "#1E938B", "MSS-i2" = "#FFA844", "MSS-i3" = "#E96767")
+  ) +
+  # Global KW
+  stat_compare_means(method = "kruskal.test", label.y = Inf, label = "p.format"
+  ) +
+  # Pairwise Wilcoxon (unpaired)
+  stat_compare_means(method = "wilcox.test", paired = FALSE, comparisons = my_comparisons,
+    p.adjust.method = "BH", label = "p.format"
+  ) +
+  theme_bw(base_size = 14) +
+  ylab("% of cells (per patient)") + xlab("") +
+  ggtitle("TNKILC cell proportions")
+
+ggsave("TNKILC_cell_proportion.png", boxplot, height = 14, width = 15)
+
+####################################
+
+df_counts <- srat_meta_myeloid |>
+  group_by(patient.ID, David_mid_CT) |>
+  summarise(n = n(), .groups = "drop")
+
+df_totals <- srat_meta_myeloid |>
+  group_by(patient.ID) |>
+  summarise(total = n(), .groups = "drop")
+
+df_pct <- df_counts |>
+  left_join(df_totals, by = "patient.ID") |>
+  mutate(pct = 100 * n / total)
+
+patient_condition <- srat_meta_myeloid |>
+  group_by(patient.ID) |>
+  summarise(condition = unique(status), .groups = "drop")
+
+df_pct <- df_pct |>
+  left_join(patient_condition, by = "patient.ID")
+
+df_msi <- df_pct |> 
+  dplyr::filter(condition %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+
+boxplot <- ggboxplot(
+  df_msi,
+  x = "condition",
+  y = "pct",
+  fill = "condition",
+  facet.by = "David_mid_CT",
+  scales = "free_y"
+) +
+  scale_fill_manual(
+    values = c("MSI-H"  = "#1E938B", "MSS-i2" = "#FFA844", "MSS-i3" = "#E96767")
+  ) +
+  stat_compare_means(method = "kruskal.test", label.y = Inf, label = "p.format"
+  ) +
+  stat_compare_means(method = "wilcox.test", paired = FALSE, comparisons = my_comparisons,
+    p.adjust.method = "BH", label = "p.format"
+  ) +
+  theme_bw(base_size = 14) +
+  ylab("% of cells (per patient)") + xlab("") +
+  ggtitle("Myeloid cell proportions")
+
+ggsave("Myeloid_cell_proportion.png", boxplot, height = 12, width = 13)
+
+####################################
+df_counts <- srat_meta_fibroblast |>
+  group_by(patient.ID, David_mid_CT) |>
+  summarise(n = n(), .groups = "drop")
+
+df_totals <- srat_meta_fibroblast |>
+  group_by(patient.ID) |>
+  summarise(total = n(), .groups = "drop")
+
+df_pct <- df_counts |>
+  left_join(df_totals, by = "patient.ID") |>
+  mutate(pct = 100 * n / total)
+
+patient_condition <- srat_meta_fibroblast |>
+  group_by(patient.ID) |>
+  summarise(condition = unique(status), .groups = "drop")
+
+df_pct <- df_pct |>
+  left_join(patient_condition, by = "patient.ID")
+
+df_msi <- df_pct |> 
+  dplyr::filter(condition %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+
+boxplot <- ggboxplot(
+  df_msi,
+  x = "condition",
+  y = "pct",
+  fill = "condition",
+  facet.by = "David_mid_CT",
+  scales = "free_y"
+) +
+  scale_fill_manual(
+    values = c("MSI-H"  = "#1E938B", "MSS-i2" = "#FFA844", "MSS-i3" = "#E96767")
+  ) +
+  stat_compare_means(method = "kruskal.test", label.y = Inf, label = "p.format"
+  ) +
+  stat_compare_means(method = "wilcox.test", paired = FALSE, comparisons = my_comparisons,
+    p.adjust.method = "BH", label = "p.format"
+  ) +
+  theme_bw(base_size = 14) +
+  ylab("% of cells (per patient)") + xlab("") +
+  ggtitle("Myeloid cell proportions")
+
+ggsave("Stromal_cell_proportion.png", boxplot, height = 13, width = 13)
+```
+
+# Subset Object at least n=3 w/ 15 cells per MSI Status
+
+```{r}
+keep_cells <- WhichCells(srat_clean, expression = !(David_mid_CT %in% c("CAF CXCL14+", "CD4 T-helper", "Cycling Myeloid", "Entericglial", "Fibroblast ADAMDEC1", "Fibroblast BMP-producing", "Fibroblast KCNN3", "Neutrophil", "Myofibroblast", "Smooth Muscle", "pDC")))
+srat_min15  <- subset(srat_clean, cells = keep_cells)
+
+# Save Final Object
+saveRDS(srat_min15, "joanito_full_object_251127_David_annotated_min15cells_in_3patients.rds")
+```
+
+```{r}
+srat_meta_stromal <- srat_meta |>
+  filter(David_MCT == "Fibroblast")
+
+table(srat_meta_fibroblast$David_MCT, srat_meta_fibroblast$MCT)
+table(srat_meta_myeloid$David_MCT, srat_meta_myeloid$MCT)
+table(srat_meta_tnkilc$David_MCT, srat_meta_tnkilc$MCT)
+
+table(srat_meta$David_MCT, srat_meta$MCT)
+
+srat <- readRDS("joanito_full_object_251127_David_annotated_corrected.rds")
+srat_meta <- srat@meta.data
+srat_meta <- srat_meta |>
+  mutate(
+    corrected = case_when(
+      David_MCT == "B"      & MCT == "B"      ~ "B",
+      David_MCT == "TNKILC" & MCT == "T"      ~ "TNKILC",
+      David_MCT == "TNKILC"      & MCT == "NK"      ~ "TNKILC",
+      David_MCT == "Endothelial"     & MCT == "Endothelial"     ~ "Endothelial",
+      David_MCT == "Entericglial"      & MCT == "Entericglial"      ~ "Entericglial",
+      David_MCT == "Epithelial"      & MCT == "Epithelial"      ~ "Epithelial",
+      David_MCT == "Fibroblast"     & MCT == "Fibroblast"     ~ "Fibroblast",
+      David_MCT == "Mast"      & MCT == "Mast"      ~ "Mast",
+      David_MCT == "Myeloid"      & MCT == "McDC"      ~ "Myeloid",
+      David_MCT == "Neutrophil"      & MCT == "Neutrophils"      ~ "Neutrophil",
+      David_MCT == "pDC"     & MCT == "pDC"     ~ "pDC",
+      David_MCT == "PlasmaB"      & MCT == "PlasmaB"      ~ "PlasmaB",
+      TRUE ~ "contaminant"
+    )
+  )
+
+srat_meta_filt <- srat_meta |>
+  filter(corrected != "contaminant")
+
+keep_cells <- WhichCells(srat_meta, expression = !(David_MCT == "contaminant"))
+srat_filt  <- subset(srat_clean, cells = keep_cells)
+```
+
+```{r}
+# Keep only those cells in the Seurat object
+srat_filtered <- subset(srat, cells = rownames(srat_meta_filt))
+saveRDS(srat_filtered, "full_object_251127_David_annotated_corrected.rds")
+
+srat_epithelial <- readRDS("joanito_epithelial_251119.rds")
+srat_epi_filtered <- subset(srat_epithelial, cells = rownames(srat_meta_filt))
+saveRDS(srat_epi_filtered, "epithelial_251127_David_annotated_corrected.rds")
+
+srat_myeloid <- readRDS("joanito_myeloid_251121_David_annotated_correct.rds")
+srat_myeloid_filtered <- subset(srat_myeloid, cells = rownames(srat_meta_filt))
+saveRDS(srat_myeloid_filtered, "myeloid_251127_David_annotated_correct.rds")
+
+srat_tnk <- readRDS("joanito_tnk_251125_David_annotated.rds")
+srat_tnk_filtered <- subset(srat_tnk, cells = rownames(srat_meta_filt))
+saveRDS(srat_tnk_filtered, "tnk_251127_David_annotated_corrected.rds")
+
+srat_stromal <- readRDS("joanito_stromal_251120_David_annotated.rds")
+srat_stromal_filtered <- subset(srat_stromal, cells = rownames(srat_meta_filt))
+saveRDS(srat_myeloid_filtered, "stromal_251127_David_annotated_corrected.rds")
+
+srat_other <- readRDS("joanito_rest_cells_251120.rds")
+srat_other_filtered <- subset(srat_other, cells = rownames(srat_meta_filt))
+saveRDS(srat_other_filtered, "other_cells_251127_David_annotated_corrected.rds")
+
+keep_cells <- WhichCells(srat_filtered, expression = !(David_mid_CT %in% c("CAF CXCL14+", "CD4 T-helper", "Cycling Myeloid", "Entericglial", "Fibroblast ADAMDEC1", "Fibroblast BMP-producing", "Fibroblast KCNN3", "Neutrophil", "Myofibroblast", "Smooth Muscle", "pDC")))
+srat_min15<- subset(srat_filtered, cells = keep_cells)
+
+keep_cells <- WhichCells(srat_min15, expression = status %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+srat_min15  <- subset(srat_min15, cells = keep_cells)
+
+srat_min15@meta.data <- srat_min15@meta.data |>
+  dplyr::rename(
+    David_old_annotation = David_cell_type,
+    David_cell_type = David_mid_CT,
+    PID = patient.ID
+  )
+
+# Save Final Object
+saveRDS(srat_min15, "full_object_251127_David_annotated_corrected_min15cells_3patients_msi_icms.rds")
+```
+
+```{r Also filter patient+celltype+status w/ <15 cells}
+srat_meta <- srat_min15@meta.data
+srat_meta$combo_label <- paste0(srat_meta$David_cell_type, "_", srat_meta$status, "_", srat_meta$PID)
+srat_min15$combo_label <- paste0(srat_min15$David_cell_type, "_", srat_min15$status, "_", srat$PID)
+
+table_middle_annotation <- srat_meta |>
+  group_by(combo_label) |>
+  summarise(n_cells = n(), .groups = "drop") |>
+  mutate(pass_15 = n_cells > 15)
+print(table_middle_annotation)
+
+valid_combos <- table_middle_annotation |>
+  filter(pass_15) |>
+  pull(combo_label) |>
+  unique()
+
+srat_filtered <- subset(srat_min15, subset = combo_label %in% valid_combos)
+
+saveRDS(srat_min15, "joanito_full_object_251128_David_annotated_min15cells_in_3patients_post_filter.rds")
+```
+
+## Additional
+
+```{r New annotation}
+# Mid annotation
+mid_map <- c(
+  "PlasmaB" = "PlasmaB",
+  "myCAF" = "myCAF",
+  "Pericyte" = "Pericyte",
+  "Macro C1QC" = "Macrophage C1QC_TREM2",
+  "Macro TREM2+" = "Macrophage C1QC_TREM2",
+  "CD8 resident memory/gd T cell" = "CD8 resident memory-gd T cell",
+  "CD8 effector/memory" = "CD8 effector-memory",
+  "CD4 central memory-like" = "CD4 central memory-like",
+  "NK-ILC" = "NK-ILC",
+  "B" = "B",
+  "CD4 naive" = "CD4 naive",
+  "Fibro ADAMDEC1" = "Fibroblast ADAMDEC1",
+  "Cycling Myeloid" = "Cycling Myeloid",
+  "Arterial_Capillary Endothelial cell" = "Endothelial",
+  "CD8 resident memory/gd T cell" = "CD8 rm - gd T cell",
+  "Mast" = "Mast",
+  "Entericglial" = "Entericglial",
+  "Cycling TNKILC" = "Cycling TNKILC",
+  "Fibro KCNN3" = "Fibroblast KCNN3",
+  "Myofibroblast" = "Myofibroblast",
+  "CD4 T-helper" = "CD4 T-helper",
+  "Epithelial" = "Epithelial",
+  "Treg" = "Treg",
+  "cDC" = "cDC",
+  "Venous Endothelial cell" = "Endothelial",
+  "CD4 Th17" = "CD4 Th17",
+  "Macro LYVE1+" = "Macrophage LYVE1",
+  "Fibro BMP-producing" = "Fibroblast BMP-producing",
+  "CXCL14+ CAF" = "CAF CXCL14+",
+  "CD4 Tfh-like" = "CD4 Tfh-like",
+  "Monocyte" = "Monocyte",
+  "MAIT" = "MAIT",
+  "Neutrophil" = "Neutrophil",
+  "Macro SPP1+" = "Macrophage SPP1",
+  "CD8 effector/exhausted" = "CD8 effector-exhausted",
+  "pDC" = "pDC",
+  "Smooth Muscle" = "Smooth Muscle",
+  "Lymphatic Endothelial cell" = "Endothelial",
+  "Fibro stem cell niche" = "Fibroblast stem cell niche"
+)
+
+srat_filt <- readRDS("full_object_251127_David_annotated_corrected.rds")
+srat_meta_filt <- srat_filt@meta.data
+rm(srat_filt)
+
+# Myeloid
+srat_myeloid <- readRDS("joanito_myeloid_251121_David_annotated_correct.rds")
+srat_myeloid@meta.data$David_cell_type <- mid_map[srat_myeloid@meta.data$David_CT1]
+srat_myeloid$status <- case_when(
+  srat_myeloid$Bo_patient_iCMS_purity == "Normal" & srat_myeloid$Bo_patient_msi == "Normal" ~ "Normal",
+  srat_myeloid$Bo_patient_iCMS_purity == "iCMS3"  & srat_myeloid$Bo_patient_msi == "MSS"    ~ "MSS-i3",
+  srat_myeloid$Bo_patient_iCMS_purity == "iCMS2"  & srat_myeloid$Bo_patient_msi == "MSS"    ~ "MSS-i2",
+  srat_myeloid$Bo_patient_msi == "MSI-H"                                                  ~ "MSI-H",
+  TRUE ~ "Indeterminate"
+)
+srat_myeloid <- subset(srat_myeloid, cells = rownames(srat_meta_filt))
+saveRDS(srat_myeloid, "myeloid_251127_David_annotated_correct.rds")
+rm(srat_myeloid)
+
+# Stromal
+srat_stromal <- readRDS("joanito_stromal_251120_David_annotated.rds")
+srat_stromal@meta.data$David_cell_type <- mid_map[srat_stromal@meta.data$David_CT1]
+srat_stromal$status <- case_when(
+  srat_stromal$Bo_patient_iCMS_purity == "Normal" & srat_stromal$Bo_patient_msi == "Normal" ~ "Normal",
+  srat_stromal$Bo_patient_iCMS_purity == "iCMS3"  & srat_stromal$Bo_patient_msi == "MSS"    ~ "MSS-i3",
+  srat_stromal$Bo_patient_iCMS_purity == "iCMS2"  & srat_stromal$Bo_patient_msi == "MSS"    ~ "MSS-i2",
+  srat_stromal$Bo_patient_msi == "MSI-H"                                                  ~ "MSI-H",
+  TRUE ~ "Indeterminate"
+)
+srat_stromal <- subset(srat_stromal, cells = rownames(srat_meta_filt))
+saveRDS(srat_stromal, "stromal_251127_David_annotated_correct.rds")
+rm(srat_stromal)
+
+# TNK
+srat_tnk <- readRDS("joanito_tnk_251125_David_annotated.rds")
+srat_tnk@meta.data$David_cell_type <- mid_map[srat_tnk@meta.data$David_CT1]
+srat_tnk$status <- case_when(
+  srat_tnk$Bo_patient_iCMS_purity == "Normal" & srat_tnk$Bo_patient_msi == "Normal" ~ "Normal",
+  srat_tnk$Bo_patient_iCMS_purity == "iCMS3"  & srat_tnk$Bo_patient_msi == "MSS"    ~ "MSS-i3",
+  srat_tnk$Bo_patient_iCMS_purity == "iCMS2"  & srat_tnk$Bo_patient_msi == "MSS"    ~ "MSS-i2",
+  srat_tnk$Bo_patient_msi == "MSI-H"                                                  ~ "MSI-H",
+  TRUE ~ "Indeterminate"
+)
+srat_tnk <- subset(srat_tnk, cells = rownames(srat_meta_filt))
+saveRDS(srat_tnk, "tnk_251127_David_annotated_correct.rds")
+rm(srat_tnk)
+
+# Epithelial
+srat_epithelial <- readRDS("joanito_epithelial_251119.rds")
+srat_epithelial@meta.data$David_cell_type <- "Epithelial"
+srat_epithelial$status <- case_when(
+  srat_epithelial$Bo_patient_iCMS_purity == "Normal" & srat_epithelial$Bo_patient_msi == "Normal" ~ "Normal",
+  srat_epithelial$Bo_patient_iCMS_purity == "iCMS3"  & srat_epithelial$Bo_patient_msi == "MSS"    ~ "MSS-i3",
+  srat_epithelial$Bo_patient_iCMS_purity == "iCMS2"  & srat_epithelial$Bo_patient_msi == "MSS"    ~ "MSS-i2",
+  srat_epithelial$Bo_patient_msi == "MSI-H"                                                  ~ "MSI-H",
+  TRUE ~ "Indeterminate"
+)
+srat_epithelial <- subset(srat_epithelial, cells = rownames(srat_meta_filt))
+saveRDS(srat_epithelial, "epithelial_251127_David_annotated_correct.rds")
+rm(srat_epithelial)
+
+# Other
+srat_other <- readRDS("joanito_rest_cells_251120.rds")
+srat_other@meta.data$David_cell_type <- mid_map[srat_other@meta.data$David_MCT]
+srat_other$status <- case_when(
+  srat_other$Bo_patient_iCMS_purity == "Normal" & srat_other$Bo_patient_msi == "Normal" ~ "Normal",
+  srat_other$Bo_patient_iCMS_purity == "iCMS3"  & srat_other$Bo_patient_msi == "MSS"    ~ "MSS-i3",
+  srat_other$Bo_patient_iCMS_purity == "iCMS2"  & srat_other$Bo_patient_msi == "MSS"    ~ "MSS-i2",
+  srat_other$Bo_patient_msi == "MSI-H"                                                  ~ "MSI-H",
+  TRUE ~ "Indeterminate"
+)
+srat_other <- subset(srat_other, cells = rownames(srat_meta_filt))
+saveRDS(srat_other, "other_cells_251127_David_annotated_correct.rds")
+rm(srat_other)
+```
+
+
+```{r}
+# Fibroblasts
+colorsX <- distinctColorPalette(length(unique(srat$David_mid_CT)))
+  
+srat_meta <- srat@meta.data
+
+srat_meta$merged_id <- paste(srat_meta$patient.ID, srat_meta$David_mid_CT, srat_meta$status, sep = "_")
+
+cell_counts <- srat_meta |>
+  group_by(merged_id) |>
+  tally(name = "cell_count")
+
+valid_ids <- cell_counts |>
+  filter(cell_count >= 15) |>
+  pull(merged_id)
+
+srat_meta_filtered <- srat_meta |>
+  filter(merged_id %in% valid_ids)
+
+df_pct<- srat_meta_filtered |>
+  group_by(status, David_mid_CT) |>
+  summarise(n = n(), .groups = "drop_last") |>
+  mutate(percent = 100 * n / sum(n)) |>
+  ungroup() |>
+  filter(status %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+
+pct_mid <- ggplot(df_pct, aes(x = status, y = percent, fill = David_mid_CT)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = colorsX) +
+  labs(
+    x = "Patient (MSI-iCMS status)",
+    y = "Proportion",
+    fill = "Cell Type"
+  ) +
+  theme_bw()
+pct_mid
+
+
+###################################
+
+df_counts <- srat_meta_filtered |>
+  group_by(patient.ID, David_mid_CT) |>
+  summarise(n = n(), .groups = "drop")
+
+df_totals <- srat_meta_filtered |>
+  group_by(patient.ID) |>
+  summarise(total = n(), .groups = "drop")
+
+df_pct <- df_counts |>
+  left_join(df_totals, by = "patient.ID") |>
+  mutate(pct = 100 * n / total)
+
+patient_condition <- srat_meta_filtered |>
+  group_by(patient.ID) |>
+  summarise(condition = unique(status), .groups = "drop")
+
+df_pct <- df_pct |>
+  left_join(patient_condition, by = "patient.ID")
+
+df_msi <- df_pct |> 
+  dplyr::filter(condition %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+
+get_pw <- function(pw_mat, g1, g2) {
+  if (is.null(pw_mat)) return(NA_real_)
+  
+  if (is.matrix(pw_mat)) {
+    if (g1 %in% rownames(pw_mat) && g2 %in% colnames(pw_mat)) {
+      return(pw_mat[g1, g2])
+    }
+    if (g2 %in% rownames(pw_mat) && g1 %in% colnames(pw_mat)) {
+      return(pw_mat[g2, g1])
+    }
+  }
+  
+  if (is.numeric(pw_mat) && !is.null(names(pw_mat))) {
+    nm <- names(pw_mat)
+    pair1 <- paste0(g1, "-", g2)
+    pair2 <- paste0(g2, "-", g1)
+    if (pair1 %in% nm) return(pw_mat[pair1])
+    if (pair2 %in% nm) return(pw_mat[pair2])
+  }
+  
+  return(NA_real_)
+}
+
+kw_results <- df_msi |>
+  group_by(David_mid_CT) |>
+  summarise(
+    data_ct = list(cur_data()),
+    p_kw = kruskal.test(pct ~ condition, data = cur_data())$p.value,
+
+    pw = list(
+      pairwise.wilcox.test(
+        x = cur_data()$pct,
+        g = cur_data()$condition,
+        exact = FALSE,
+        p.adjust.method = "BH"
+      )$p.value
+    ),
+
+    median_MSIH  = median(pct[condition == "MSI-H"]),
+    median_MSSi2 = median(pct[condition == "MSS-i2"]),
+    median_MSSi3 = median(pct[condition == "MSS-i3"]),
+    
+    .groups = "drop"
+  ) |>
+  rowwise() |>
+  mutate(
+    p_MSIH_vs_MSSi2  = get_pw(pw, "MSI-H", "MSS-i2"),
+    p_MSIH_vs_MSSi3  = get_pw(pw, "MSI-H", "MSS-i3"),
+    p_MSSi2_vs_MSSi3 = get_pw(pw, "MSS-i2", "MSS-i3")
+  ) |>
+  ungroup() |>
+  mutate(
+    FDR_KW = p.adjust(p_kw, method = "BH")
+  ) |>
+  dplyr::select(
+    David_mid_CT,
+    p_kw, FDR_KW,
+    median_MSIH, median_MSSi2, median_MSSi3,
+    p_MSIH_vs_MSSi2, p_MSIH_vs_MSSi3, p_MSSi2_vs_MSSi3
+  )
+
+my_comparisons <- list(
+  c("MSI-H", "MSS-i2"),
+  c("MSI-H", "MSS-i3"),
+  c("MSS-i2", "MSS-i3")
+)
+
+boxplot <- ggboxplot(
+  df_msi,
+  x = "condition",
+  y = "pct",
+  fill = "condition",
+  facet.by = "David_mid_CT",
+  scales = "free_y"
+) +
+  scale_fill_manual(
+    values = c("MSI-H"  = "#1E938B", "MSS-i2" = "#FFA844", "MSS-i3" = "#E96767")
+  ) +
+  stat_compare_means(method = "kruskal.test", label.y = Inf, label = "p.format"
+  ) +
+  stat_compare_means(method = "wilcox.test", paired = FALSE, comparisons = my_comparisons,
+    p.adjust.method = "BH", label = "p.format"
+  ) +
+  theme_bw(base_size = 14) +
+  ylab("% of cells (per patient)") + xlab("") +
+  ggtitle("TNKILC cell proportions")
+
+ggsave("All_cell_proportion_filtered.png", boxplot, height = 20, width = 18)
+
+
+#### OPTION 2
+n_patients <- df_msi |>
+  group_by(David_mid_CT, condition) |>
+  summarize(n = n_distinct(patient.ID), 
+            y_pos = min(pct) - 2,
+            .groups = "drop")
+
+boxplot <- ggboxplot(
+  df_msi,
+  x = "condition",
+  y = "pct",
+  fill = "condition",
+  facet.by = "David_mid_CT",
+  scales = "free_y"
+) +
+  scale_fill_manual(
+    values = c("MSI-H"  = "#1E938B", "MSS-i2" = "#FFA844", "MSS-i3" = "#E96767")
+  ) +
+  stat_compare_means(method = "kruskal.test", label.y = Inf, label = "p.format") +
+  stat_compare_means(
+    method = "wilcox.test", paired = FALSE, comparisons = my_comparisons,
+    p.adjust.method = "BH", label = "p.format"
+  ) +
+  theme_bw(base_size = 14) +
+  ylab("% of cells (per patient)") +
+  xlab("") +
+  ggtitle("TNKILC cell proportions") +
+  geom_text(
+    data = n_patients,
+    aes(x = condition, y = y_pos, label = paste0("n=", n)),
+    inherit.aes = FALSE,
+    vjust = 1
+  )
+
+ggsave("All_cell_proportion_filtered_v2.png", boxplot, height = 22, width = 18)
+```
+
+```{r}
+broad_map <- c(
+
+  ## CD4 T cells
+  "CD4 naive"                = "CD4",
+  "CD4 central memory-like"  = "CD4",
+  "CD4 T-helper"             = "CD4",
+  "CD4 Th17"                 = "CD4",
+  "CD4 Tfh-like"             = "CD4",
+  "Treg"                     = "CD4",
+
+  ## CD8 T cells
+  "CD8 effector-memory"          = "CD8",
+  "CD8 effector-exhausted"       = "CD8",
+  "CD8 resident memory-gd T cell"= "CD8",
+  "CD8 rm - gd T cell"           = "CD8",
+
+  ## Macrophages / Myeloid
+  "Macrophage C1QC"          = "Macrophages",
+  "Macrophage TREM2"         = "Macrophages",
+  "Macrophage LYVE1"         = "Macrophages",
+  "Macrophage SPP1"          = "Macrophages",
+
+  ## Fibroblasts / CAFs
+  "myCAF"                    = "Fibroblasts",
+  "Fibroblast ADAMDEC1"      = "Fibroblasts",
+  "Fibroblast KCNN3"         = "Fibroblasts",
+  "Fibroblast BMP-producing" = "Fibroblasts",
+  "Fibroblast stem cell niche" = "Fibroblasts",
+  "CAF CXCL14"               = "Fibroblasts",
+  "Myofibroblast"            = "Fibroblasts",
+
+  ## Epithelial
+  "Epithelial"               = "Epithelial",
+
+  ## Everything else
+  "Monocyte"                 = "Others",
+  "Cycling Myeloid"          = "Others",
+  "NK-ILC"                   = "Others",
+  "Cycling TNKILC"           = "Others",
+  "MAIT"                     = "Others",
+  "B"                        = "Others",
+  "PlasmaB"                  = "Others",
+  "cDC"                      = "Others",
+  "pDC"                      = "Others",
+  "Neutrophil"               = "Others",
+  "Mast"                     = "Others",
+  "Smooth Muscle"            = "Others",
+  "Pericyte"                 = "Others",
+  "Entericglial"             = "Others",
+  "Arterial-Capillary Endothelial cell" = "Others",
+  "Venous Endothelial cell"  = "Others",
+  "Lymphatic Endothelial cell" = "Others"
+)
+
+srat@meta.data$Broad_cell_type <-
+  broad_map[srat@meta.data$David_specific_CT]
+
+srat@meta.data$Broad_cell_type[is.na(srat@meta.data$Broad_cell_type)] <- "Others"
+```
+
+```{r}
+srat_meta <- srat@meta.data
+
+srat_meta$merged_id <- paste(srat_meta$patient.ID, srat_meta$Broad_cell_type, srat_meta$status, sep = "_")
+
+cell_counts <- srat_meta |>
+  group_by(merged_id) |>
+  tally(name = "cell_count")
+
+valid_ids <- cell_counts |>
+  filter(cell_count >= 15) |>
+  pull(merged_id)
+
+srat_meta_filtered <- srat_meta |>
+  filter(merged_id %in% valid_ids)
+
+df_pct<- srat_meta_filtered |>
+  group_by(status, Broad_cell_type) |>
+  summarise(n = n(), .groups = "drop_last") |>
+  mutate(percent = 100 * n / sum(n)) |>
+  ungroup() |>
+  filter(status %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+
+pct_mid <- ggplot(df_pct, aes(x = status, y = percent, fill = Broad_cell_type)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = my_colors) +
+  labs(
+    x = "Patient (MSI-iCMS status)",
+    y = "Proportion",
+    fill = "Cell Type"
+  ) +
+  theme_bw()
+pct_mid
+
+###################################
+
+df_counts <- srat_meta_filtered |>
+  group_by(patient.ID, Broad_cell_type) |>
+  summarise(n = n(), .groups = "drop")
+
+df_totals <- srat_meta_filtered |>
+  group_by(patient.ID) |>
+  summarise(total = n(), .groups = "drop")
+
+df_pct <- df_counts |>
+  left_join(df_totals, by = "patient.ID") |>
+  mutate(pct = 100 * n / total)
+
+patient_condition <- srat_meta_filtered |>
+  group_by(patient.ID) |>
+  summarise(condition = unique(status), .groups = "drop")
+
+df_pct <- df_pct |>
+  left_join(patient_condition, by = "patient.ID")
+
+df_msi <- df_pct |> 
+  dplyr::filter(condition %in% c("MSI-H", "MSS-i2", "MSS-i3"))
+
+get_pw <- function(pw_mat, g1, g2) {
+  if (is.null(pw_mat)) return(NA_real_)
+  
+  if (is.matrix(pw_mat)) {
+    if (g1 %in% rownames(pw_mat) && g2 %in% colnames(pw_mat)) {
+      return(pw_mat[g1, g2])
+    }
+    if (g2 %in% rownames(pw_mat) && g1 %in% colnames(pw_mat)) {
+      return(pw_mat[g2, g1])
+    }
+  }
+  
+  if (is.numeric(pw_mat) && !is.null(names(pw_mat))) {
+    nm <- names(pw_mat)
+    pair1 <- paste0(g1, "-", g2)
+    pair2 <- paste0(g2, "-", g1)
+    if (pair1 %in% nm) return(pw_mat[pair1])
+    if (pair2 %in% nm) return(pw_mat[pair2])
+  }
+  
+  return(NA_real_)
+}
+
+kw_results <- df_msi |>
+  group_by(Broad_cell_type) |>
+  summarise(
+    data_ct = list(cur_data()),
+    
+    p_kw = kruskal.test(pct ~ condition, data = cur_data())$p.value,
+    
+    pw = list(
+      pairwise.wilcox.test(
+        x = cur_data()$pct,
+        g = cur_data()$condition,
+        exact = FALSE,
+        p.adjust.method = "BH"
+      )$p.value
+    ),
+    
+    median_MSIH  = median(pct[condition == "MSI-H"]),
+    median_MSSi2 = median(pct[condition == "MSS-i2"]),
+    median_MSSi3 = median(pct[condition == "MSS-i3"]),
+    
+    .groups = "drop"
+  ) |>
+  rowwise() |>
+  mutate(
+    p_MSIH_vs_MSSi2  = get_pw(pw, "MSI-H", "MSS-i2"),
+    p_MSIH_vs_MSSi3  = get_pw(pw, "MSI-H", "MSS-i3"),
+    p_MSSi2_vs_MSSi3 = get_pw(pw, "MSS-i2", "MSS-i3")
+  ) |>
+  ungroup() |>
+  mutate(
+    FDR_KW = p.adjust(p_kw, method = "BH")
+  ) |>
+  dplyr::select(
+    Broad_cell_type,
+    p_kw, FDR_KW,
+    median_MSIH, median_MSSi2, median_MSSi3,
+    p_MSIH_vs_MSSi2, p_MSIH_vs_MSSi3, p_MSSi2_vs_MSSi3
+  )
+
+my_comparisons <- list(
+  c("MSI-H", "MSS-i2"),
+  c("MSI-H", "MSS-i3"),
+  c("MSS-i2", "MSS-i3")
+)
+
+boxplot <- ggboxplot(
+  df_msi,
+  x = "condition",
+  y = "pct",
+  fill = "condition",
+  facet.by = "Broad_cell_type",
+  scales = "free_y"
+) +
+  scale_fill_manual(
+    values = c("MSI-H"  = "#1E938B", "MSS-i2" = "#FFA844", "MSS-i3" = "#E96767")
+  ) +
+  stat_compare_means(method = "kruskal.test", label.y = Inf, label = "p.format"
+  ) +
+  stat_compare_means(method = "wilcox.test", paired = FALSE, comparisons = my_comparisons,
+    p.adjust.method = "BH", label = "p.format"
+  ) +
+  theme_bw(base_size = 14) +
+  ylab("% of cells (per patient)") + xlab("") +
+  ggtitle("TNKILC cell proportions")
+
+ggsave("Macro_cell_proportion_filtered.png", boxplot, height = 10, width = 15)
+
+
+#### OPTION 2
+n_patients <- df_msi |>
+  group_by(Broad_cell_type, condition) |>
+  summarize(n = n_distinct(patient.ID), 
+            y_pos = min(pct) - 2,
+            .groups = "drop")
+
+boxplot <- ggboxplot(
+  df_msi,
+  x = "condition",
+  y = "pct",
+  fill = "condition",
+  facet.by = "Broad_cell_type",
+  scales = "free_y"
+) +
+  scale_fill_manual(
+    values = c("MSI-H"  = "#1E938B", "MSS-i2" = "#FFA844", "MSS-i3" = "#E96767")
+  ) +
+  stat_compare_means(method = "kruskal.test", label.y = Inf, label = "p.format") +
+  stat_compare_means(
+    method = "wilcox.test", paired = FALSE, comparisons = my_comparisons,
+    p.adjust.method = "BH", label = "p.format"
+  ) +
+  theme_bw(base_size = 14) +
+  ylab("% of cells (per patient)") +
+  xlab("") +
+  ggtitle("TNKILC cell proportions") +
+  geom_text(
+    data = n_patients,
+    aes(x = condition, y = y_pos, label = paste0("n=", n)),
+    inherit.aes = FALSE,
+    vjust = 1
+  )
+
+ggsave("Macro_cell_proportion_filtered_v2.png", boxplot, height = 11, width = 15)
+```
+
+```{r}
+tnk_cells <- WhichCells(srat, expression = Broad_cell_type != "Others")
+srat_filt  <- subset(srat, cells = tnk_cells)
+
+tnk_cells <- WhichCells(srat, expression = status %in% c("MSS-i2", "MSS-i3", "MSI-H"))
+srat_filt  <- subset(srat, cells = tnk_cells)
+```
+
+
